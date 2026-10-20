@@ -192,7 +192,7 @@ def make_handler(store: Store, agent_id: str | None = None, show_turns: bool = F
                 if parts == []:
                     if "text/html" in (self.headers.get("Accept") or ""):
                         return self._dashboard(parts)  # a browser gets the dashboard
-                    return self._send(200, b'{"service":"humansout-node","version":"0.2"}')
+                    return self._send(200, json.dumps({"service": "humansout-node", "version": __version__}).encode())
                 if parts[0] in ("dashboard", "dashboard.js", "api", "badge") and self._dashboard(parts):
                     return None
             except (ValueError, OSError):
