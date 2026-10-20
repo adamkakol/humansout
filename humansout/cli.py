@@ -156,7 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="a deliverable on which the check and your counterexample pass (proves the test is fair)")
     ch.add_argument("--no-preflight", action="store_true", help="post without first running it as verifiers will")
     ch.add_argument("--check-fails", action="store_true",
-                    help="runnable challenge without extra files: the mission's own check already fails")
+                    help="(no longer needed: every node runs the mission's check on every claim and rejects failures)")
 
     dp = sub.add_parser("dispute", help="as the claim's author: say a counterexample expects the wrong thing")
     dp.add_argument("target", help="counterexample challenge id")

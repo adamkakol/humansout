@@ -294,6 +294,7 @@ def cycle(node, cfg: WatchConfig, turns_per_cycle: int = 1) -> dict:
     if cfg.verify and sandbox.find_engine():
         try:
             report["verified"] = [{"challenge": r["challenge"], "counterexample": r["counterexample"]}
+                                  if "counterexample" in r else {"claim": r["claim"], "check": r["check"]}
                                   for r in node.verify()["verified"]]
         except HumansOutError as e:
             report["verify_error"] = str(e)[:300]

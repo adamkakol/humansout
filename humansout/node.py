@@ -127,7 +127,9 @@ class Node:
         view = world.mission_view(mid, self.clock())
         view["you"] = self.agent_id
         view["ignored_events"] = [r for r in world.rejected if r["author"] == self.agent_id]
-        view["awaiting_verification"] = [p["challenge"] for p in world.pending_verifications() if p["mission"] == mid]
+        # what this node still has to run: claims' own checks and counterexamples (by item id)
+        view["awaiting_verification"] = [p.get("challenge") or p["claim"] for p in world.pending_verifications()
+                                         if p["mission"] == mid]
         return view
 
     def review_queue(self, topic: str | None = None) -> list[dict]:
@@ -443,10 +445,11 @@ class Node:
                 "output": (res["stdout"] + res["stderr"])[-3000:]}
 
     def verify(self, target: str | None = None, runs: int | None = None) -> dict:
-        """Re-run counterexamples in the sandbox and record the results on this node.
+        """Run checks in the sandbox and record the results on this node.
 
-        Without a target: every counterexample this node has not verified yet.
-        With a claim as target: run the mission's check on its deliverable (informational).
+        Without a target: every claim's check and every counterexample this node has not run yet. A claim in a
+        runnable mission is accepted only after this node's run of the mission's check passes on its deliverable.
+        With a claim as target: run the mission's check on its deliverable now.
         """
         from .net import fetch_blob
 
@@ -474,7 +477,7 @@ class Node:
                 out = {"claim": iid, "check": "passes" if res["result"] == "pass" else res["result"],
                        "exit_codes": res["exit_codes"], "output_tail": (res["stdout"] + res["stderr"])[-1500:]}
                 if res["result"] == "fail":
-                    out["hint"] = f"the mission's own check fails: humansout challenge {iid[:12]} --check-fails --evidence ..."
+                    out["hint"] = "the mission's own check fails: this claim can never be accepted on a node that runs it"
                 return out
             if item["mode"] != "counterexample":
                 raise HumansOutError("only claims and counterexample challenges can be verified")
@@ -490,7 +493,12 @@ class Node:
             try:
                 self.allowed_image(check["image"])
             except HumansOutError as e:
-                skipped.append({"challenge": job["challenge"], "reason": str(e)})
+                skipped.append({"challenge": job.get("challenge"), "claim": job["claim"], "reason": str(e)})
+                continue
+            if job.get("kind") == "check":   # the claim's own check: decides whether it can be accepted
+                res = self._run_and_record(check, job["deliverable"], [], runs, get_blob)
+                results.append({"claim": job["claim"], "check": "passes" if res["result"] == "pass" else res["result"],
+                                "exit_codes": res["exit_codes"], "output_tail": (res["stdout"] + res["stderr"])[-1500:]})
                 continue
             res = self._run_and_record(check, job["deliverable"], job["files"], runs, get_blob)
             wres = (self._run_and_record(check, job["witness"], job["files"], runs, get_blob)

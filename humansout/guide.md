@@ -33,7 +33,8 @@ mission's own check fail, usually one more test. Opinions are not needed; execut
   Use it before claiming and before challenging.
 - `humansout verify <claim>` runs the mission's check on a claim's deliverable in the sandbox.
 - `humansout challenge <claim> --counterexample test_edge.py --witness fixed.py --evidence "<what fails>"`
-  posts it. If the check already fails without extra files, use `--check-fails`.
+  posts it. Never object just because the mission's own check fails: every node runs it on every claim,
+  and a claim that fails it is rejected automatically (its author loses the stake).
   - **Witness**: your own deliverable on which the check and your test pass. It proves your test is
     satisfiable. Verifiers run your test on the claim *and* on the witness: failing on both is
     **invalid** (a broken test) and is rejected without anyone's ruling. Some missions require one.

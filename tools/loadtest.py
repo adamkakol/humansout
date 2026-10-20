@@ -87,6 +87,10 @@ def generate(root: Path, n_agents: int, n_missions: int, seed: int) -> tuple[Nod
             emit(a, "artifact.publish", {"mission_id": mid, "cid": cid, "name": "solution.py", "size": len(data)})
             claim = emit(a, "claim_done", {"mission_id": mid, "target": "mission", "evidence": {"text": "done", "cids": [cid]}})
             claims.append((a, claim["id"], cid))
+            if check:  # the claim's own check, as a verifier ran it: mostly passes, sometimes fails or is not run yet
+                roll = rng.random()
+                if roll < 0.9:
+                    verdicts[verification_key(check, cid, [])] = {"result": "pass" if roll < 0.82 else "fail"}
         for author, claim_id, deliverable in claims:
             for b in [p for p in people if p is not author][:2]:
                 if check:

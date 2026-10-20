@@ -230,7 +230,7 @@ class World:
             # A new claim or objection settles nothing at once: an objection must come inside its target's
             # window, and the new item's own deadlines lie ahead. Only those deadlines need watching.
             item = self.items[e["id"]]
-            for ts in (item["close_ts"], item.get("resolve_ts")):
+            for ts in (item["ts"] if item.get("check_key") else None, item["close_ts"], item.get("resolve_ts")):
                 if ts:
                     heapq.heappush(self._deadlines, (ts, e["id"]))
                     self._next_due = min(self._next_due, ts)
@@ -430,13 +430,18 @@ class World:
         evidence = self._evidence(e["body"])
         if evidence is None:
             return self._reject(e, "claim needs evidence (text or cids)")
-        if mission["check"] and target == "mission" and not evidence["cids"]:
-            # without a deliverable nothing can be re-run or broken, and the claim would pass by default
-            return self._reject(e, f"this mission has a runnable check: name your deliverable "
-                                   f"({mission['check']['deliverable']}) as the first cid; publish it first")
+        extra = {}
+        if mission["check"]:
+            if not evidence["cids"]:
+                # without a deliverable nothing can be re-run or broken, and the claim would pass by default
+                return self._reject(e, f"this mission has a runnable check: name your deliverable "
+                                       f"({mission['check']['deliverable']}) as the first cid; publish it first")
+            # the claim is accepted only if this node's own run of the mission's check passes on the deliverable
+            key = verification_key(mission["check"], evidence["cids"][0], [])
+            extra = {"check_key": key, "check_result": self.verifications.get(key)}
         domain = mission["domain"]
         stake = self.stake_for(e["author"], domain)
-        self._open_item(e, "claim", mission, target, evidence, stake, mode="claim")
+        self._open_item(e, "claim", mission, target, evidence, stake, mode="claim", **extra)
         mission["claims"].append(e["id"])
 
     def _challenge(self, e):
@@ -589,6 +594,11 @@ class World:
             return self._ce_outcome(item, t) is not None or self.items[item["target"]]["settled"]
         if item["kind"] == "claim" and any(self._proven(c, t) for c in item["challengers"]):
             return True                      # a reproduced counterexample refutes before the window ends
+        if item.get("check_key"):
+            if item["check_result"] in ("fail", "flaky"):
+                return True                  # the mission's own check fails on it: it can never be accepted
+            if item["check_result"] is None:
+                return False                 # never guess: wait until this node has run the check
         if t < item["close_ts"]:
             return False
         return all(self._resolvable(c, t) for c in item["challengers"])
@@ -654,6 +664,13 @@ class World:
             else:
                 item["status"] = "rejected"
                 self._stat(item["author"], item["domain"])["failed_challenges"] += 1
+            return
+        if item.get("check_result") in ("fail", "flaky"):
+            item["status"], item["upheld"] = "failed_check", False
+            item["reason"] = ("the mission's check fails on the deliverable" if item["check_result"] == "fail"
+                              else "the mission's check gives different results on repeated runs")
+            self.balances[key] -= item["stake"]   # the stake is lost: junk claims cost something
+            self._stat(item["author"], item["domain"])["refuted"] += 1
             return
         if item["kind"] == "challenge":
             item["status"] = "upheld"
@@ -785,7 +802,10 @@ class World:
         ces = [self.items[c] for c in item["challengers"] if self.items[c]["mode"] == "counterexample"]
         if any(c["verification"] == "fail" and not (c["ruling"] and c["ruling"]["decision"] == "rejected") for c in ces):
             return "failing"
-        if any(c["verification"] is None and not c["settled"] for c in ces):
+        if item.get("check_result") in ("fail", "flaky"):
+            return "failing"
+        if any(c["verification"] is None and not c["settled"] for c in ces) or (
+                item.get("check_key") and item.get("check_result") is None):
             return "awaiting_verification"
         return None
 
@@ -800,6 +820,10 @@ class World:
         }
         if item["kind"] == "claim":
             view["verification_status"] = self._claim_signal(item)
+            if item.get("check_key"):
+                view["check"] = {"pass": "passes", "fail": "fails", "flaky": "flaky", None: "not run yet"}[item["check_result"]]
+                if item["reason"]:
+                    view["reason"] = item["reason"]
         if item["mode"] == "counterexample":
             view.update({"files": item["files"], "witness": item["witness"],
                          "verification": LABELS.get(item["verification"], "unverified"),
@@ -823,11 +847,14 @@ class World:
         return sorted(out, key=lambda x: (-x["stake"], x["closes_at_ms"]))
 
     def pending_verifications(self) -> list[dict]:
-        """Counterexamples this node has not re-run yet."""
+        """Claims whose check and counterexamples this node has not run yet."""
         out = []
         for iid in sorted(self.pending):
             item = self.items[iid]
-            if item["mode"] == "counterexample" and item["verification"] is None:
+            if item.get("check_key") and item["check_result"] is None:
+                out.append({"kind": "check", "claim": iid, "mission": item["mission"],
+                            "deliverable": item["evidence"]["cids"][0], "files": [], "witness": None})
+            elif item["mode"] == "counterexample" and item["verification"] is None:
                 claim = self.items[item["target"]]
                 out.append({"challenge": iid, "claim": claim["id"], "mission": item["mission"],
                             "deliverable": claim["evidence"]["cids"][0], "files": item["files"],

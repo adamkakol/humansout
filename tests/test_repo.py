@@ -159,9 +159,10 @@ def test_repo_mission_end_to_end(tmp_path, capsys):
     ch = breaker.challenge(claim, "add(-1, 1) returns 2", counterexample=[str(test)], witness=witness)
     assert ch["preflight"] == "reproduced" and "AssertionError" in ch["on_claim"]
     share(creator, builder, breaker)
-    assert [r["counterexample"] for r in creator.verify()["verified"]] == ["reproduced"]
+    assert [r["counterexample"] for r in creator.verify()["verified"] if "counterexample" in r] == ["reproduced"]
     world = creator.world()
-    assert world.item_view(claim)["verification_status"] == "failing"
+    view = world.item_view(claim)  # the dispute window is 3 s: by now the claim may already be refuted
+    assert view["verification_status"] == "failing" or view["refuted_by"] == ch["challenge"]
 
 
 @needs_engine

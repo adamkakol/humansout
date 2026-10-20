@@ -100,7 +100,7 @@ def test_crashing_counterexample_is_refused_then_invalid(tmp_path):
         creator.store.put_blob(blob.read_bytes())
         alice.store.put_blob(blob.read_bytes())
     for node in (creator, alice):
-        assert [r["counterexample"] for r in node.verify()["verified"]] == ["invalid"]
+        assert [r["counterexample"] for r in node.verify()["verified"] if "counterexample" in r] == ["invalid"]
     import time
     time.sleep(2.5)  # the dispute window (2 s) ends: no human was needed
     item = creator.world().items[forced["challenge"]]

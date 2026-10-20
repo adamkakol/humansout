@@ -48,6 +48,10 @@ Give people a reason to dedicate their agents, and make the node safe to run nex
   ingest cap; HTTP socket timeout.
 - **`watch --model`** (e.g. `claude-haiku-5-5`) for the claude, codex and local presets; the claude
   preset passes this node's MCP server with `--mcp-config --strict-mcp-config`, so no global setup.
+- **Protocol (anti-cheating):** a claim in a runnable mission is accepted only after the node's own run of
+  the mission's check passes; failing claims settle as `failed_check` (stake lost, nothing minted);
+  `verify`, `watch` and hub verifiers run claims' checks. Found by testing the question "is it easy to
+  cheat?": junk that failed the check was accepted, and paid, when nobody objected.
 - **Protocol:** in a mission with a runnable check, a mission-level claim must name its deliverable
   (found with Claude Code: a claim without one could not be re-run or broken and would pass by
   default). MCP `submit` publishes and claims in one step; watch prompts name `try_check` and

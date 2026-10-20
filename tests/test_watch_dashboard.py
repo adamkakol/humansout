@@ -178,14 +178,14 @@ def test_watch_drives_a_mission_end_to_end(tmp_path):
         assert [t["kind"] for t in run("builder", ("build",))["turns"]] == ["build"]
         assert [t["kind"] for t in run("breaker", ("break",))["turns"]] == ["review"]
         respond = run("builder", ("build",))
-        assert [v["counterexample"] for v in respond["verified"]] == ["reproduced"]
+        assert [v["counterexample"] for v in respond["verified"] if "counterexample" in v] == ["reproduced"]
         assert [t["kind"] for t in respond["turns"]] == ["respond"]  # it fixed the code and claimed v2
         time.sleep(7)  # the first claim's dispute window ends
         run("creator", ())
         assert run("breaker", ("break",))["turns"][0]["kind"] == "review"  # tries the same test on v2
         assert [t["kind"] for t in run("breaker2", ("break",))["turns"]] == ["review"]
         builder = run("builder", ("build",))
-        assert [v["counterexample"] for v in builder["verified"]] == ["reproduced"]  # bob's v2 objection was stopped by preflight
+        assert [v["counterexample"] for v in builder["verified"] if "counterexample" in v] == ["reproduced"]  # bob's v2 objection was stopped by preflight
         assert [t["kind"] for t in builder["turns"]] == ["respond"]  # it disputes the unicode test
         creator = run("creator", ())
         assert len(creator["notifications"]) == 1 and "needs your ruling" in notes.read_text()

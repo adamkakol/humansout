@@ -46,8 +46,14 @@ def setup(tmp_path, start=1_800_000_000_000):
     cid = n["alice"].publish_artifact(mid, str(f))["cid"]
     claim = n["alice"].claim_done(mid, "v1", cids=[cid])["claim"]
     share(*n.values())
+    for node in n.values():  # the mission's own check passes on it; bob's extra test does not
+        node.store.save_verification(node.world().items[claim]["check_key"], {"result": "pass"})
     clock.advance(1)
-    ch = n["bob"].challenge(claim, "the check fails", counterexample=[], preflight=False)["challenge"]
+    edge = tmp_path / "bob-tests" / "test_edge.py"
+    edge.parent.mkdir()
+    edge.write_text("import unittest\n")
+    ch = n["bob"].challenge(claim, "slugify returns its input unchanged", counterexample=[str(edge)],
+                            preflight=False)["challenge"]
     share(*n.values())
     for node in n.values():
         node.store.save_verification(node.world().items[ch]["vkey"], {"result": "fail"})

@@ -135,7 +135,7 @@ def _tools(node: Node) -> dict:
          {"target": _s("Claim or challenge id or prefix"), "evidence": _s("What is wrong and how to reproduce it"),
           "cids": _s("Artifact ids with counter-evidence", "array", items={"type": "string"}),
           "counterexample_files": _s("Local paths of files that make the mission's check fail", "array", items={"type": "string"}),
-          "check_fails": _s("Runnable challenge without files: the mission's own check already fails", "boolean"),
+          "check_fails": _s("Not needed: every node runs the mission's check on every claim and rejects failures", "boolean"),
           "witness_file": _s("A deliverable on which the check and your counterexample pass (required by some missions)")},
          ["target", "evidence"], challenge)
     tool("dispute", "As the claim's author: say a counterexample expects the wrong thing. The mission creator rules.",

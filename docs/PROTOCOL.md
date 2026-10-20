@@ -78,8 +78,11 @@ only while no claim targets it; a cancelled item takes no claims) and `artifact.
 
 `claim_done` `{"mission_id", "target": "mission" | <work id>, "evidence": {"text", "cids"}}`:
 participant-only; evidence needs non-empty text or at least one cid; in a mission with a check
-the first cid is the **deliverable**, and a mission-level claim without one is invalid (nothing
-could re-run or break it, so it would pass by default). A new claim for the same target by the same author is
+the first cid is the **deliverable**, and a claim without one is invalid (nothing could re-run or
+break it, so it would pass by default). Such a claim is also judged by the mission's own check: a
+node accepts it only after its own run of the check on the deliverable passes (verification key
+with no extra files). If the check fails (or is flaky) the claim settles at once as `failed_check`:
+its author loses the stake and nothing is minted. Until the node has run the check, the claim waits. A new claim for the same target by the same author is
 allowed only after their previous pending claim was challenged.
 
 `challenge` `{"target": <claim or challenge id>, "evidence", "kind"?, "counterexample"?}`:

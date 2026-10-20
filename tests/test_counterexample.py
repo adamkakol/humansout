@@ -70,6 +70,8 @@ def claim(n, mid, tmp_path, name="v1", text="def slugify(s):\n    return s.lower
     cid = n["alice"].publish_artifact(mid, str(path), "slugify.py")["cid"]
     out = n["alice"].claim_done(mid, f"{name}: basic test passes", cids=[cid])
     share(*n.values())
+    for node in n.values():  # every node has run the mission's own check on it: it passes
+        node.store.save_verification(node.world().items[out["claim"]]["check_key"], {"result": "pass"})
     return out["claim"]
 
 
@@ -349,3 +351,41 @@ def test_mcp_exposes_the_runnable_protocol(tmp_path):
             "deliverable": "slugify.py", "check_files": [str(test)]}}})
     assert reply["result"]["isError"] is False
     assert json.loads(reply["result"]["content"][0]["text"])["runnable_check"] is True
+
+
+def test_claims_are_accepted_only_after_their_own_check_passes(net):
+    """Found by asking 'is it easy to cheat?': junk that failed the mission's check was accepted, and paid,
+    when nobody objected. Every node now runs the mission's check on every claim before accepting it."""
+    clock, n, mid, tmp_path = net
+    junk = tmp_path / "junk.py"
+    junk.write_text("this is not even python\n")
+    n["alice"].join(mid)
+    cid = n["alice"].publish_artifact(mid, str(junk), "slugify.py")["cid"]
+    c = n["alice"].claim_done(mid, "trust me", cids=[cid])["claim"]
+    share(*n.values())
+    creator = n["creator"]
+    clock.advance(200)  # far past the window, nobody objected, nobody ran the check: it waits, it is not accepted
+    view = state_of(creator, c)
+    assert view["status"] == "pending" and view["check"] == "not run yet"
+    assert view["verification_status"] == "awaiting_verification"
+    assert c in creator.mission_state(mid)["awaiting_verification"]
+    before = creator.world().balance(n["alice"].agent_id, "software/python")
+    for node in n.values():  # every node runs the check (verify, watch): it fails
+        node.store.save_verification(node.world().items[c]["check_key"], {"result": "fail"})
+    world = creator.world()
+    assert world.items[c]["status"] == "failed_check" and world.items[c]["minted"] == 0
+    assert world.balance(n["alice"].agent_id, "software/python") == before - world.items[c]["stake"]
+    assert "fails" in world.item_view(c)["reason"]
+    fixed = claim(n, mid, tmp_path, name="v2")  # a rejected claim leaves the author free to claim again
+    clock.advance(200)
+    assert n["creator"].world().items[fixed]["status"] == "accepted"
+
+
+def test_work_item_claims_in_runnable_missions_need_a_deliverable(net):
+    clock, n, mid, tmp_path = net
+    clock.advance(1)
+    wid = n["creator"].add_work(mid, "District 1")["work_id"]
+    share(*n.values())
+    n["alice"].join(mid)
+    with pytest.raises(HumansOutError, match="name your deliverable"):
+        n["alice"].claim_done(mid, "done", work_id=wid)

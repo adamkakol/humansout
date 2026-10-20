@@ -93,10 +93,11 @@ def test_four_nodes_settle_disputes_by_rerunning(tmp_path):
         for n in names:
             out = nodes[n].verify()
             if n == "bob":  # the challenger's preflight already ran it exactly as verifiers do
-                assert out["verified"] == [] and nodes[n].world().item_view(c1)["verification_status"] == "failing"
+                assert [r for r in out["verified"] if "counterexample" in r] == [] and nodes[n].world().item_view(c1)["verification_status"] == "failing"
                 continue
-            assert [r["counterexample"] for r in out["verified"]] == ["reproduced"], (n, out)
-            assert out["verified"][0]["claim_signal"] == "failing"
+            ces = [r for r in out["verified"] if "counterexample" in r]
+            assert [r["counterexample"] for r in ces] == ["reproduced"], (n, out)
+            assert ces[0]["claim_signal"] == "failing"
             assert out["remaining"] == 0
         clock.advance(6)  # dispute window over: refuted long before the 100 s claim window ends
         for n in names:
@@ -115,7 +116,7 @@ def test_four_nodes_settle_disputes_by_rerunning(tmp_path):
         ce3 = nodes["carol"].challenge(c2, "slugs should keep Polish letters", counterexample=[carol_test])["challenge"]
         sync_all()
         for n in names:
-            got = {r["challenge"]: r["counterexample"] for r in nodes[n].verify()["verified"]}
+            got = {r["challenge"]: r["counterexample"] for r in nodes[n].verify()["verified"] if "counterexample" in r}
             assert got == ({} if n == "carol" else {ce3: "reproduced"}), (n, got)  # carol's preflight already ran it
 
         # carol's test does fail, but it asks for something the mission never asked for: a question of meaning

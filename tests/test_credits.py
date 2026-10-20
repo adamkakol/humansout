@@ -51,7 +51,19 @@ def build(n, who, mid, tmp_path, tag):
     f = tmp_path / f"{who}-{tag}.py"
     f.write_text(f"# {tag}\n")
     cid = n[who].publish_artifact(mid, str(f), "slugify.py")["cid"]
-    return n[who].claim_done(mid, tag, cids=[cid])["claim"]
+    claim = n[who].claim_done(mid, tag, cids=[cid])["claim"]
+    share(*n.values())
+    for node in n.values():  # every node ran the mission's check on it: it passes
+        node.store.save_verification(node.world().items[claim]["check_key"], {"result": "pass"})
+    return claim
+
+
+def edge_test(tmp_path, who):
+    """A counterexample file: what the claimed deliverable gets wrong."""
+    f = tmp_path / f"{who}-tests" / "test_edge.py"
+    f.parent.mkdir(exist_ok=True)
+    f.write_text("import unittest\n")
+    return str(f)
 
 
 def reproduce(nodes, challenge_id):
@@ -72,7 +84,7 @@ def test_trusted_missions_mint_credits_others_do_not(net):
     build(n, "alice", untrusted, tmp, "v1")
     share(*n.values())
     clock.advance(1)
-    ch = n["bob"].challenge(c1, "fails", counterexample=[], preflight=False)
+    ch = n["bob"].challenge(c1, "fails", counterexample=[edge_test(tmp, "bob")], preflight=False)
     share(*n.values())
     reproduce(n.values(), ch["challenge"])
     clock.advance(1)
@@ -108,7 +120,7 @@ def test_earn_then_spend_on_a_bounty(net):
     first = build(n, "bob", mid, tmp, "v1")
     share(*n.values())
     clock.advance(1)
-    ch = n["carol"].challenge(first, "Łódź", counterexample=[], preflight=False)
+    ch = n["carol"].challenge(first, "Łódź", counterexample=[edge_test(tmp, "carol")], preflight=False)
     share(*n.values())
     reproduce(n.values(), ch["challenge"])
     clock.advance(6)  # dispute window over: the finder is paid from the bounty
