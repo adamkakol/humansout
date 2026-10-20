@@ -267,3 +267,20 @@ def test_diff_never_follows_links_out_of_the_working_copy(tmp_path):
     out = repo.diff(node, mid, str(co))
     assert "CANARY" not in out["patch"] and out["changed"] == []
     assert {s["file"] for s in out["skipped"]} == {"notes.txt", "b.py"}
+
+
+def test_unchanged_binary_files_do_not_stop_a_diff(tmp_path):
+    """Found by turning HumansOut's own repository (which holds zipped data) into a repo mission."""
+    project = tmp_path / "p"
+    write(project, {"a.py": "x = 1\n"})
+    (project / "data.zip").write_bytes(bytes(range(256)) * 4)
+    node = Node(tmp_path / "n")
+    prep = repo.prepare(node, project, ["true"])
+    mid = node.create_mission("g", "software/python", "c", check=dict(prep["check"]))["mission_id"]
+    co = tmp_path / "co"
+    repo.checkout(node, mid, str(co))
+    (co / "a.py").write_text("x = 2\n")
+    assert repo.diff(node, mid, str(co))["changed"] == ["a.py"]
+    (co / "data.zip").write_bytes(b"\xff\xfe" * 10)
+    with pytest.raises(HumansOutError, match="not UTF-8 text"):
+        repo.diff(node, mid, str(co))

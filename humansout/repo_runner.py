@@ -144,9 +144,10 @@ def main():
                PIP_DISABLE_PIP_VERSION_CHECK="1", PYTHONPATH=os.pathsep.join([DEPS, REPO]))
     wheels = os.path.join(REPO, ".humansout", "wheels")
     if os.path.isdir(wheels) and os.listdir(wheels):
-        names = sorted(w for w in os.listdir(wheels) if w.endswith(".whl"))
+        # by distribution name, so pip picks the wheel that fits this machine (x86_64 and aarch64 can both be vendored)
+        names = sorted({w.split("-")[0] for w in os.listdir(wheels) if w.endswith(".whl")})
         r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-index", "--find-links", wheels,
-                            "--target", DEPS] + [os.path.join(wheels, w) for w in names], env=env)
+                            "--target", DEPS] + names, env=env)
         if r.returncode:
             print("humansout: installing the vendored wheels failed", file=sys.stderr)
             return 3

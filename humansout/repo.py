@@ -89,13 +89,21 @@ def pack(repo: Path, files: list[str], wheels: list[Path] = ()) -> bytes:
     return buf.getvalue()
 
 
-def download_wheels(packages: list[str], python: str, dest: Path) -> list[Path]:
-    """Fetch wheels for the check's Python with pip (this needs network, on the creator's machine only)."""
-    cmd = [sys.executable, "-m", "pip", "download", "-q", "--disable-pip-version-check", "--only-binary=:all:",
-           "--python-version", python, "-d", str(dest), *packages]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode:
-        raise HumansOutError("pip download failed: " + (res.stderr or res.stdout)[-600:])
+ARCHES = ("x86_64", "aarch64")  # verifiers run on both: vendor wheels for each
+
+
+def download_wheels(packages: list[str], python: str, dest: Path, arches=ARCHES) -> list[Path]:
+    """Fetch wheels for the check's Python, for every architecture verifiers use (pip needs network here,
+    on the creator's machine only; checks stay offline). Pure-Python wheels are shared."""
+    for arch in arches:
+        tags = [f"manylinux_2_{v}_{arch}" for v in (36, 34, 28, 17)] + [f"manylinux2014_{arch}"]
+        cmd = [sys.executable, "-m", "pip", "download", "-q", "--disable-pip-version-check", "--only-binary=:all:",
+               "--python-version", python, "--implementation", "cp", "-d", str(dest), *packages]
+        for tag in tags:
+            cmd[cmd.index("-d"):cmd.index("-d")] = ["--platform", tag]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode:
+            raise HumansOutError(f"pip download failed for {arch}: " + (res.stderr or res.stdout)[-600:])
     return sorted(dest.glob("*.whl"))
 
 
@@ -120,7 +128,10 @@ def prepare(node, repo: str | Path, test: list[str], extra: list[str] | None = N
     try:
         if deps:
             wheels += download_wheels(list(deps), _image_python(image), tmp)
-        binary = [w.name for w in wheels if not w.name.endswith("-none-any.whl")]
+        arch_of = lambda w: next((a for a in ARCHES if a in w.name), None)  # noqa: E731
+        binary_dists = {w.name.split("-")[0] for w in wheels if not w.name.endswith("-none-any.whl")}
+        binary = [d for d in sorted(binary_dists)
+                  if {arch_of(w) for w in wheels if w.name.split("-")[0] == d} != set(ARCHES)]
         data = pack(repo, files, wheels)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -136,7 +147,8 @@ def prepare(node, repo: str | Path, test: list[str], extra: list[str] | None = N
     (folder / RUNNER).write_text(resources.files("humansout").joinpath("repo_runner.py").read_text(encoding="utf-8"))
     check = {"command": ["python", f"/work/{RUNNER}"], "deliverable": DELIVERABLE, "image": image,
              "files": [str(folder / n) for n in ("repo.tar.gz", "repo_check.json", RUNNER)]}
-    warnings = [f"{w} is a binary wheel: verifiers on another CPU or OS cannot install it" for w in binary]
+    warnings = [f"{d} is vendored as a binary wheel for only some architectures: verifiers on the others cannot "
+                f"install it (use --deps to fetch every architecture)" for d in binary]
     return {"check": check, "files": len(files), "bytes": len(data), "wheels": [w.name for w in wheels],
             "skipped": skipped, "warnings": warnings}
 
@@ -254,10 +266,12 @@ def diff(node, mission: str, workdir: str, out: str | None = None) -> dict:
         (skipped.append({"file": rel, "reason": reason}) if reason else after_names.append(rel))
     text, changed = [], []
     for name in sorted(set(before) | set(after_names)):
-        a = _lines(before[name], name) if name in before else []
-        b = _lines((root / name).read_bytes(), name) if name in after_names else []
-        if a == b and (name in before) == (name in after_names):
-            continue
+        old = before.get(name)
+        new = (root / name).read_bytes() if name in after_names else None
+        if old == new:
+            continue  # unchanged, binary or not: never decoded
+        a = _lines(old, name) if old is not None else []
+        b = _lines(new, name) if new is not None else []
         lines = _hunks(a, b, f"a/{name}" if name in before else "/dev/null",
                        f"b/{name}" if name in after_names else "/dev/null")
         if lines:
