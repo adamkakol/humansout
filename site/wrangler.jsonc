@@ -1,0 +1,7 @@
+{
+  // humansout.si: a static site served by the Cloudflare Worker "humansout" (custom domain humansout.si)
+  "name": "humansout",
+  "compatibility_date": "2026-10-12",
+  "observability": { "enabled": true },
+  "assets": { "directory": "public" }
+}

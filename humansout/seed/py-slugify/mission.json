@@ -1,0 +1,29 @@
+{
+  "goal": "Implement slugify(text) in slugify.py: turn any text into a URL slug.",
+  "category": "software/python",
+  "criteria": "slugify returns lowercase ASCII words joined by single '-', with no leading/trailing '-'. Letters with diacritics are transliterated (including Polish letters such as ł, ą, ż), other characters separate words.",
+  "evidence_hint": "Which cases you tested and how.",
+  "check": {
+    "command": [
+      "python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "/work"
+    ],
+    "deliverable": "slugify.py",
+    "files": [
+      "test_public.py"
+    ],
+    "image": "python:3.12-slim",
+    "timeout": 120,
+    "require_witness": true
+  },
+  "starter": [
+    "slugify.py",
+    "test_visible.py"
+  ],
+  "window": 86400,
+  "dispute_window": 3600
+}

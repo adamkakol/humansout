@@ -1,0 +1,77 @@
+"""Runnable verification: settle disputes by re-running them, not by opinion.
+
+A mission may declare a check in its manifest: a container image, a command, the
+files the check needs and the file name of the deliverable. A claim's first
+artifact is the deliverable. A counterexample challenge adds files (usually one
+more test) and says: with these files, the mission's own check fails.
+
+Every node can re-run that in its sandbox and reach the same answer, so whether
+a counterexample *reproduces* is decided by execution. Whether it *expects the
+right thing* is a question of meaning: the claim's author may dispute it and the
+mission creator rules (see state.py).
+
+Results are stored locally per node (Store.save_verification) and read by the
+deterministic fold. A node that has not verified a counterexample does not guess.
+"""
+
+from __future__ import annotations
+
+import shutil
+import tempfile
+from pathlib import Path
+
+from . import sandbox
+from .core import HumansOutError, canonical, sha256_hex
+
+DEFAULT_TIMEOUT = 300
+LABELS = {"fail": "reproduced", "pass": "not_reproduced", "flaky": "flaky", "invalid": "invalid"}
+
+
+def verification_key(check: dict, deliverable_cid: str, extra_files) -> str:
+    """Identifies one run: same check, same deliverable, same extra files -> same key on every node."""
+    return sha256_hex(canonical({
+        "image": check["image"],
+        "command": check["command"],
+        "timeout": check.get("timeout", DEFAULT_TIMEOUT),
+        "deliverable": [check["deliverable"], deliverable_cid],
+        "check_files": [[f["name"], f["cid"]] for f in check.get("files", [])],
+        "extra_files": [[f["name"], f["cid"]] for f in extra_files],
+    }))
+
+
+def run_check(get_blob, check: dict, deliverable_cid: str, extra_files=(), runs: int = 1) -> dict:
+    """Run a mission's check on a deliverable, optionally with counterexample files.
+
+    `get_blob(cid)` returns the bytes of a content id or None. Every run uses a fresh
+    work directory inside the sandbox (no network, read-only root, only /work mounted).
+    The result is "pass", "fail", or "flaky" when repeated runs disagree.
+    """
+    wanted = ([(check["deliverable"], deliverable_cid)]
+              + [(f["name"], f["cid"]) for f in check.get("files", [])]
+              + [(f["name"], f["cid"]) for f in extra_files])
+    blobs = {}
+    for name, cid in wanted:
+        data = get_blob(cid)
+        if data is None:
+            raise HumansOutError(f"artifact {cid} ({name}) is not available here; run `humansout sync` first")
+        blobs[name] = data
+    codes, last = [], {}
+    for _ in range(max(1, int(runs))):
+        work = Path(tempfile.mkdtemp(prefix="humansout-verify-"))
+        try:
+            for name, data in blobs.items():
+                (work / name).write_bytes(data)
+            last = sandbox.run(str(work), list(check["command"]), image=check["image"],
+                               timeout=int(check.get("timeout", DEFAULT_TIMEOUT)))
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        if last.get("timeout"):
+            codes.append("timeout")  # a check that never finishes did not pass
+            continue
+        if last["exit_code"] == 125:  # the engine itself failed (e.g. image not available)
+            raise HumansOutError("the container engine could not start the check: " + last["stderr"][-400:])
+        codes.append(last["exit_code"])
+    failed = {code != 0 for code in codes}
+    result = "flaky" if len(failed) > 1 else ("fail" if failed == {True} else "pass")
+    return {"result": result, "exit_codes": codes, "image": check["image"],
+            "stdout": last.get("stdout", "")[-4000:], "stderr": last.get("stderr", "")[-4000:]}

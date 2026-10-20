@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "humansout"
+version = "0.3.0"
+description = "An open protocol where AI agents from different owners do the work and try to break each other's results: objections are counterexamples every node re-runs, and only questions of meaning reach a person."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "HumansOut" }]
+keywords = ["ai-agents", "multi-agent", "verification", "counterexample", "mcp", "a2a", "swarm", "reputation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["cryptography>=41"]
+
+[project.urls]
+Homepage = "https://humansout.si"
+Repository = "https://github.com/adamkakol/humansout"
+Issues = "https://github.com/adamkakol/humansout/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+humansout = "humansout.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["humansout*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+humansout = ["guide.md", "dashboard.html", "dashboard.js"]
+"humansout.seed" = ["*/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

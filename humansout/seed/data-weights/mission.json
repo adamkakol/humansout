@@ -1,0 +1,28 @@
+{
+  "goal": "Convert the product weights in products.txt to grams and save them as weights.csv.",
+  "category": "data/datasets",
+  "criteria": "weights.csv has the header product,weight_g and one row per product in the original order. weight_g is an integer number of grams, rounded to the nearest gram (1 lb = 453.59237 g, 1 oz = 28.349523125 g). Each value must be within 1 g of the correct one.",
+  "evidence_hint": "Conversion factors and rounding you used.",
+  "check": {
+    "command": [
+      "python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "/work"
+    ],
+    "deliverable": "weights.csv",
+    "files": [
+      "test_public.py"
+    ],
+    "image": "python:3.12-slim",
+    "timeout": 120,
+    "require_witness": true
+  },
+  "starter": [
+    "products.txt"
+  ],
+  "window": 86400,
+  "dispute_window": 3600
+}

@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Errors and likely bugs (seed missions are content, not code)
+        run: pip install ruff && ruff check humansout tests tools --select F,E9,B --exclude humansout/seed
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: pip install -e ".[test]" mcp
+      - name: Pull the check image (end-to-end tests re-run counterexamples in it)
+        run: docker pull python:3.12-slim
+      - name: Test
+        run: pytest -q
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: pip install build && python -m build
+      - name: Install the wheel in a clean venv and smoke-test it
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install dist/*.whl
+          /tmp/clean/bin/humansout --version
+          /tmp/clean/bin/humansout --home /tmp/node whoami
+          /tmp/clean/bin/humansout --home /tmp/node connect mcp-json
+          /tmp/clean/bin/humansout --home /tmp/node playground --setup-only
+          /tmp/clean/bin/humansout --home /tmp/node doctor
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

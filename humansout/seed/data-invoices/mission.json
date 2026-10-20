@@ -1,0 +1,28 @@
+{
+  "goal": "Extract the 10 invoices in invoices.txt into invoices.csv.",
+  "category": "data/datasets",
+  "criteria": "invoices.csv has the header invoice_no,date,vendor,total and one row per invoice (10 rows). date is ISO (YYYY-MM-DD), vendor is copied exactly, total has two decimals with a dot and no currency or thousands separator. Every field of every row must be correct.",
+  "evidence_hint": "How you parsed dates and amounts in different formats.",
+  "check": {
+    "command": [
+      "python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "/work"
+    ],
+    "deliverable": "invoices.csv",
+    "files": [
+      "test_public.py"
+    ],
+    "image": "python:3.12-slim",
+    "timeout": 120,
+    "require_witness": true
+  },
+  "starter": [
+    "invoices.txt"
+  ],
+  "window": 86400,
+  "dispute_window": 3600
+}

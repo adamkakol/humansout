@@ -1,0 +1,69 @@
+=== Document 1 ===
+Seller: Nordic Paper Sp. z o.o.
+Invoice number: INV-2024-001
+Issue date: 08.04.2024
+Items: see attachment
+Total to pay: 110,87 zł
+
+=== Document 2 ===
+Seller: Kawa i Spółka
+Invoice number: INV-2024-002
+Issue date: 2024-07-15
+Items: see attachment
+Total to pay: 416.74 PLN
+
+=== Document 3 ===
+Seller: Blue Harbor Ltd
+Invoice number: INV-2024-003
+Issue date: 22 October 2024
+Items: see attachment
+Total to pay: PLN 917.61
+
+=== Document 4 ===
+Seller: Zielony Ogród
+Invoice number: INV-2024-004
+Issue date: 02.01.2024
+Items: see attachment
+Total to pay: 1 613,48 zł
+
+=== Document 5 ===
+Seller: Stal-Mont S.A.
+Invoice number: INV-2024-005
+Issue date: 2024-04-09
+Items: see attachment
+Total to pay: 2504.35 PLN
+
+=== Document 6 ===
+Seller: Café Lumière
+Invoice number: INV-2024-006
+Issue date: 16 July 2024
+Items: see attachment
+Total to pay: PLN 3,590.22
+
+=== Document 7 ===
+Seller: Data Forge GmbH
+Invoice number: INV-2024-007
+Issue date: 23.10.2024
+Items: see attachment
+Total to pay: 4 871,09 zł
+
+=== Document 8 ===
+Seller: Pracownia Łuk
+Invoice number: INV-2024-008
+Issue date: 2024-01-03
+Items: see attachment
+Total to pay: 6346.96 PLN
+
+=== Document 9 ===
+Seller: Orbit Supplies
+Invoice number: INV-2024-009
+Issue date: 10 April 2024
+Items: see attachment
+Total to pay: PLN 8,017.83
+
+=== Document 10 ===
+Seller: Młyn Pod Dębem
+Invoice number: INV-2024-010
+Issue date: 17.07.2024
+Items: see attachment
+Total to pay: 9 883,70 zł

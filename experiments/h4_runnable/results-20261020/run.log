@@ -1,0 +1,61 @@
+06:47:56 preflight py-slugify     correct   oracle=pass public=pass ok
+06:47:56 preflight py-slugify     defective oracle=fail public=pass ok
+06:47:57 preflight py-duration    correct   oracle=pass public=pass ok
+06:47:58 preflight py-duration    defective oracle=fail public=pass ok
+06:47:58 preflight py-intervals   correct   oracle=pass public=pass ok
+06:47:59 preflight py-intervals   defective oracle=fail public=pass ok
+06:48:00 preflight data-invoices  correct   oracle=pass public=pass ok
+06:48:00 preflight data-invoices  defective oracle=fail public=pass ok
+06:48:01 preflight data-weights   correct   oracle=pass public=pass ok
+06:48:02 preflight data-weights   defective oracle=fail public=pass ok
+06:48:02 preflight data-pl-dates  correct   oracle=pass public=pass ok
+06:48:03 preflight data-pl-dates  defective oracle=fail public=pass ok
+06:48:03 [1/24] T data-pl-dates correct
+06:50:21     -> objection=None verification=None claim=accepted stop=finished rounds=7 137.3s
+06:50:21 [2/24] T data-weights correct
+06:58:52     -> objection=None verification=None claim=accepted stop=finished rounds=8 511.3s
+06:58:52 [3/24] R data-weights correct
+07:03:30     -> objection=None verification=None claim=accepted stop=finished rounds=11 277.5s
+07:03:30 [4/24] T py-intervals defective
+07:06:03     -> objection=written verification=None claim=refuted stop=finished rounds=8 153.3s
+07:06:03 [5/24] T data-invoices correct
+07:12:34     -> objection=None verification=None claim=accepted stop=finished rounds=12 391.2s
+07:12:34 [6/24] T py-intervals correct
+07:21:47     -> objection=None verification=None claim=accepted stop=finished rounds=16 552.5s
+07:21:47 [7/24] T py-slugify correct
+07:48:08     -> objection=None verification=None claim=accepted stop=time_limit rounds=23 1580.8s
+07:48:08 [8/24] R py-slugify correct
+08:13:59     -> objection=None verification=None claim=accepted stop=time_limit rounds=18 1551.0s
+08:13:59 [9/24] T data-invoices defective
+08:18:30     -> objection=written verification=None claim=refuted stop=finished rounds=9 271.2s
+08:18:30 [10/24] R py-duration defective
+08:21:59     -> objection=counterexample verification=reproduced claim=refuted stop=finished rounds=10 207.1s
+08:21:59 [11/24] T py-duration correct
+08:36:10     -> objection=None verification=None claim=accepted stop=finished rounds=17 851.7s
+08:36:10 [12/24] R py-intervals correct
+08:40:16     -> objection=None verification=None claim=accepted stop=finished rounds=9 245.1s
+08:40:16 [13/24] T data-weights defective
+08:44:50     -> objection=written verification=None claim=refuted stop=finished rounds=12 274.6s
+08:44:50 [14/24] T py-duration defective
+08:48:57     -> objection=written verification=None claim=refuted stop=finished rounds=10 246.4s
+08:48:57 [15/24] R data-pl-dates correct
+08:51:45     -> objection=None verification=None claim=accepted stop=finished rounds=7 168.0s
+08:51:45 [16/24] R py-intervals defective
+08:55:16     -> objection=counterexample verification=reproduced claim=refuted stop=finished rounds=9 209.6s
+08:55:16 [17/24] R data-invoices defective
+09:01:50     -> objection=counterexample verification=reproduced claim=refuted stop=finished rounds=14 392.7s
+09:01:50 [18/24] R data-pl-dates defective
+09:06:47     -> objection=counterexample verification=reproduced claim=refuted stop=finished rounds=7 295.3s
+09:06:47 [19/24] R data-weights defective
+09:10:52     -> objection=counterexample verification=reproduced claim=refuted stop=finished rounds=9 243.5s
+09:10:52 [20/24] R py-duration correct
+09:22:30     -> objection=None verification=None claim=accepted stop=finished rounds=16 698.8s
+09:22:30 [21/24] T py-slugify defective
+09:27:41     -> objection=written verification=None claim=refuted stop=finished rounds=13 310.3s
+09:27:41 [22/24] T data-pl-dates defective
+09:32:55     -> objection=written verification=None claim=refuted stop=finished rounds=14 314.3s
+09:32:55 [23/24] R data-invoices correct
+09:40:37     -> objection=None verification=None claim=accepted stop=finished rounds=13 462.1s
+09:40:37 [24/24] R py-slugify defective
+09:44:15     -> objection=counterexample verification=reproduced claim=refuted stop=finished rounds=10 215.9s
+09:44:15 done: experiments/h4_runnable/results-20261020

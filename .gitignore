@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+experiments/etap0/results-*/
+experiments/etap0/*.log
+build/
+experiments/h4_runnable/results-*/*/nodes/
+experiments/h4_runnable/results-*/*/review/
+experiments/replay_study/phase1-*/
+experiments/h4_runnable/results-*/
+dist/

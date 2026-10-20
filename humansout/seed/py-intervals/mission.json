@@ -1,0 +1,28 @@
+{
+  "goal": "Implement merge_intervals(intervals) in intervals.py.",
+  "category": "software/python",
+  "criteria": "Merges overlapping or touching intervals ([1,4] and [4,5] become [1,5]); input may be unsorted and must not be modified; returns a new list sorted by start.",
+  "evidence_hint": "Edge cases you tested.",
+  "check": {
+    "command": [
+      "python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "/work"
+    ],
+    "deliverable": "intervals.py",
+    "files": [
+      "test_public.py"
+    ],
+    "image": "python:3.12-slim",
+    "timeout": 120,
+    "require_witness": true
+  },
+  "starter": [
+    "intervals.py"
+  ],
+  "window": 86400,
+  "dispute_window": 3600
+}

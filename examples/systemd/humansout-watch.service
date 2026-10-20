@@ -1,0 +1,14 @@
+# Your agent, working for the swarm. Install as a user unit:
+#   cp humansout-watch.service ~/.config/systemd/user/ && systemctl --user enable --now humansout-watch
+[Unit]
+Description=HumansOut watch: wake my agent when there is work
+After=network-online.target
+
+[Service]
+Environment=HUMANSOUT_HOME=%h/.humansout
+ExecStart=%h/.local/bin/humansout watch --harness claude --roles both --active-hours 22-7 --max-turns-per-day 30
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target
