@@ -310,3 +310,25 @@ def test_dashboard_keeps_itself_in_sync(tmp_path):
         proc.terminate()
         proc.wait(10)
         srv.shutdown()
+
+
+def test_build_prompts_offer_one_open_work_item(tmp_path):
+    clock = Clock()
+    creator, me = Node(tmp_path / "c", clock=clock), Node(tmp_path / "me", clock=clock)
+    mid = runnable_mission(creator, tmp_path)
+    clock.advance(1)
+    items = [creator.add_work(mid, f"District {n}")["work_id"] for n in (1, 2, 3)]
+    share(creator, me)
+    world = me.world()
+    ev = watch.find_work(world, me.agent_id, clock(), watch.WatchConfig(roles=("build",)), watch.load_state(me.home))[0]
+    prompt = watch.render_prompt(me, world, ev, watch.WatchConfig(), tmp_path)
+    assert "take ONE open item" in prompt and all(f"{w}: District" in prompt for w in items)
+    from humansout.agent import LocalAgent
+    me.store.set_config("agent_api", "http://127.0.0.1:9/v1")
+    me.store.set_config("agent_model", "m")
+    agent = LocalAgent(me, me.home / "work" / "x", log=lambda line: None)
+    agent.call("claim_work", {"mission": mid, "work_id": items[1]})
+    agent.call("write_file", {"name": "slugify.py", "content": "def slugify(s):\n    return s\n"})
+    claim = agent.call("submit", {"mission": mid, "name": "slugify.py", "evidence": "district 2", "work_id": items[1]})
+    world = me.world()
+    assert world.items[claim["claim"]]["target"] == items[1] and world.missions[mid]["work"][items[1]]["claimed_by"] == me.agent_id

@@ -56,10 +56,12 @@ TOOLS = [
         {"mission": _S, "deliverable": _S, "tests": _A}, ["mission"]),
     _fn("publish_artifact", "Publish a file from your work folder as a mission artifact; returns its content id.",
         {"mission": _S, "name": _S}, ["mission", "name"]),
-    _fn("submit", "Publish your deliverable from the work folder and claim the mission done with it, in one step.",
-        {"mission": _S, "name": _S, "evidence": _S}, ["mission", "name", "evidence"]),
-    _fn("claim_done", "Claim the mission done. The first cid must be your deliverable.",
-        {"mission": _S, "evidence": _S, "cids": _A}, ["mission", "evidence", "cids"]),
+    _fn("submit", "Publish your deliverable from the work folder and claim the mission (or one work item) done with it.",
+        {"mission": _S, "name": _S, "evidence": _S, "work_id": _S}, ["mission", "name", "evidence"]),
+    _fn("claim_work", "Take one work item of a split mission (a lease, so others do not duplicate it).",
+        {"mission": _S, "work_id": _S}, ["mission", "work_id"]),
+    _fn("claim_done", "Claim the mission (or one work item) done. The first cid must be your deliverable.",
+        {"mission": _S, "evidence": _S, "cids": _A, "work_id": _S}, ["mission", "evidence", "cids"]),
     _fn("challenge", "Object to a claim. In a mission with a runnable check, pass counterexample test files "
                      "(test_*.py in your work folder) that fail on the claimed deliverable, and a witness_file: your "
                      "own fixed deliverable on which the check and your test pass. It is run first exactly as every "
@@ -185,9 +187,14 @@ class LocalAgent:
             if n.agent_id not in world.missions[mid]["participants"]:
                 n.join(mid)  # submitting is joining: do not lose a round to it
             cid = n.publish_artifact(mid, str(self._path(a["name"])))["cid"]
-            return n.claim_done(mid, a["evidence"], cids=[cid])
+            return n.claim_done(mid, a["evidence"], a.get("work_id"), cids=[cid])
+        if name == "claim_work":
+            world = n.world()
+            if n.agent_id not in world.missions[n._mid(world, a["mission"])]["participants"]:
+                n.join(a["mission"])
+            return n.claim_work(a["mission"], a["work_id"])
         if name == "claim_done":
-            return n.claim_done(a["mission"], a["evidence"], cids=a.get("cids") or [])
+            return n.claim_done(a["mission"], a["evidence"], a.get("work_id"), cids=a.get("cids") or [])
         if name == "challenge":
             files = a.get("counterexample_files")
             witness = a.get("witness_file")

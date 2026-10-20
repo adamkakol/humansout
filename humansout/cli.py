@@ -88,6 +88,10 @@ def build_parser() -> argparse.ArgumentParser:
     wr = w.add_parser("release")
     wr.add_argument("mission")
     wr.add_argument("work")
+    wx = w.add_parser("cancel", help="withdraw a work item you created that nobody has claimed done")
+    wx.add_argument("mission")
+    wx.add_argument("work")
+    wx.add_argument("--reason", default="")
 
     a = sub.add_parser("artifact", help="artifacts").add_subparsers(dest="action", required=True)
     ap = a.add_parser("publish")
@@ -323,6 +327,8 @@ def run(args) -> object:
             return node.add_work(args.mission, args.title, args.description)
         if action == "claim":
             return node.claim_work(args.mission, args.work, args.lease)
+        if action == "cancel":
+            return node.cancel_work(args.mission, args.work, args.reason)
         return node.release_work(args.mission, args.work)
     if cmd == "artifact":
         if action == "publish":

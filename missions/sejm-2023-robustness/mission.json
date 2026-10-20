@@ -1,0 +1,34 @@
+{
+  "goal": "Research: is the 2023 Sejm result robust to the inconsistencies in its own protocols? Recompute all 460 seats from PKW's official data and, for each of the 41 districts, prove the smallest vote change that flips a seat and measure the ballots the protocols cannot account for.",
+  "category": "research/elections",
+  "criteria": "Question: how robust is the result of the 2023 Sejm election to the inconsistencies in its own official protocols? For each of the 41 districts: how many votes would have to change to change any seat, and how many ballots do the protocols fail to account for?\n\nThis is a robustness analysis of public data. A district that is not provably robust is NOT evidence of irregularities: most protocol inconsistencies are one-ballot slips (for example a voter who did not sign the list). Reports must say so.\n\nData (frozen with the mission, the only data the check uses; published by PKW, the National Electoral Commission):\n- pkw_obwody.zip = https://wybory.gov.pl/sejmsenat2023/data/csv/wyniki_gl_na_listy_po_obwodach_sejm_csv.zip (sha256 3045ac1910bac4b0e047a92278b9ab424c84eda37b2da417f2d5125757fd45a6): every polling station's protocol.\n- pkw_okregi.zip = https://wybory.gov.pl/sejmsenat2023/data/csv/okregi_sejm_csv.zip (sha256 083fd1f701d8322193e65005df3757878ef57fa3350f4f1306555620344277e1): seats per district.\n- pkw_okregi_wyniki.zip = https://wybory.gov.pl/sejmsenat2023/data/csv/wyniki_gl_na_listy_po_okregach_sejm_csv.zip (sha256 6d43643f035dbf0d935b59a2bd9a8208fa238c16360575bfe57158f030e7cde2): official district totals.\npkwlib.py reads them and fixes every definition below; read it.\n\nDefinitions (as in pkwlib.py): lists L01..L12 in PKW's column order. Eligibility: at least 5% of all valid votes nationwide, 8% for coalition committees, national-minority committees exempt; exact integer comparison. Seats: D'Hondt on PKW's official district totals; a tie for the last seat goes to the list with more votes in the district, then to the lower list number. Margin of a district: the smallest number of votes that must be added to or removed from lists in that district (the sum of the absolute changes, any number of lists, national eligibility unchanged) so that its seat allocation changes. Inconsistency volume of a district: strict = sum over its stations of max(0, O - D - N) + max(0, P - N) (ballots in the box beyond those issued and envelopes; ballots from envelopes beyond envelopes), conservative = strict + |A - C - D| per station (received minus unused minus issued), both plus the unreconciled votes |official valid votes - sum of station valid votes|. Robust (strict or conservative) means volume < margin.\n\nWork: the hub opens one work item per district and one for the country; claim a work item with result.json, or claim the whole mission with the national result.json.\n- District result.json: {\"type\": \"district\", \"district\": n, \"votes\": official totals per list, \"seats\": per list, \"margin\": m, \"witness\": {\"Lxx\": +/- votes, ...} (a vote change of total size m that changes the allocation), \"volume\": {\"strict\", \"conservative\", \"unreconciled\"}, \"robust\": {\"strict\": bool, \"conservative\": bool}, \"top_stations\": the 5 stations with the largest conservative volume (pkwlib.top_stations), \"notes\": what explains them}.\n- National result.json: {\"type\": \"national\", \"votes\", \"eligible\", \"threshold_margins\": per list the votes it must gain (or lose) to cross its threshold (null for minorities), \"seats\" (must reproduce PKW's 460), \"districts\": {\"1\": {\"margin\", \"witness\", \"volume\", \"robust\"}, ...all 41}, \"not_robust\": {\"strict\": [...], \"conservative\": [...]}, \"report\": markdown with ## Question, ## Data, ## Method, ## Results, ## Limitations, saying that a robustness bound is not evidence of irregularities}.\n\nThe check (test_result.py) recomputes everything it can from the frozen data and runs every witness. It cannot prove that a margin is the smallest possible: show a smaller vote change that flips a seat (a counterexample test using pkwlib.flips, with a corrected result.json as the witness). Wrong volumes, seats, threshold margins or witnesses are caught by the check itself. Interesting open questions for notes and reports: why do district 19's official totals contain 292 valid votes that its 1,229 station protocols do not? What explains the station reporting about a thousand more ballots in the box than it issued? Which seats are closest?",
+  "evidence_hint": "How you searched for the smallest margins (and why no smaller one exists), what the largest inconsistencies are and what explains them.",
+  "check": {
+    "command": [
+      "python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "/work"
+    ],
+    "deliverable": "result.json",
+    "files": [
+      "test_result.py",
+      "pkwlib.py",
+      "pkw_obwody.zip",
+      "pkw_okregi.zip",
+      "pkw_okregi_wyniki.zip"
+    ],
+    "image": "python:3.12-slim",
+    "timeout": 600,
+    "require_witness": true
+  },
+  "starter": [
+    "pkwlib.py"
+  ],
+  "window": 604800,
+  "dispute_window": 172800,
+  "points": 10,
+  "find_points": 15
+}

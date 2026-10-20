@@ -214,6 +214,7 @@ class World:
             "work.create": self._work_create,
             "work.claim": self._work_claim,
             "work.release": self._work_release,
+            "work.cancel": self._work_cancel,
             "artifact.publish": self._artifact,
             "claim_done": self._claim_done,
             "challenge": self._challenge,
@@ -339,7 +340,7 @@ class World:
         wid = e["id"][:12]
         mission["work"][wid] = {"id": wid, "title": title[:300], "description": str(e["body"].get("description", ""))[:5000],
                                 "created_by": e["author"], "claimed_by": None, "lease_until": 0, "done_claim": None,
-                                "ts": e["ts"]}
+                                "ts": e["ts"], "cancelled": None}
 
     def _work_item(self, e, mission):
         work = mission["work"].get(e["body"].get("work_id"))
@@ -357,6 +358,8 @@ class World:
             return
         if work["done_claim"]:
             return self._reject(e, "work item is already done")
+        if work["cancelled"]:
+            return self._reject(e, "work item was cancelled")
         if work["claimed_by"] not in (None, e["author"]) and work["lease_until"] > e["ts"]:
             return self._reject(e, "work item is claimed by another agent")
         lease = e["body"].get("lease_seconds", 3600)
@@ -370,6 +373,21 @@ class World:
             return
         if work["claimed_by"] != e["author"]:
             return self._reject(e, "only the claimant can release")
+        work["claimed_by"], work["lease_until"] = None, 0
+
+    def _work_cancel(self, e):
+        """The item's creator (or the mission's) withdraws a work item nobody has claimed done: a typo, a duplicate."""
+        mission = self._participant(e)
+        work = self._work_item(e, mission) if mission else None
+        if work is None:
+            return
+        if e["author"] not in (work["created_by"], mission["creator"]):
+            return self._reject(e, "only the work item's creator or the mission creator can cancel it")
+        if work["cancelled"]:
+            return self._reject(e, "work item is already cancelled")
+        if any(self.items[c]["target"] == work["id"] for c in mission["claims"]):
+            return self._reject(e, "work item already has a claim")
+        work["cancelled"] = {"ts": e["ts"], "reason": str(e["body"].get("reason", ""))[:500]}
         work["claimed_by"], work["lease_until"] = None, 0
 
     def _artifact(self, e):
@@ -399,6 +417,8 @@ class World:
                 return self._reject(e, "event must be later than the work item it refers to")
             if work["done_claim"]:
                 return self._reject(e, "work item is already done")
+            if work["cancelled"]:
+                return self._reject(e, "work item was cancelled")
             if work["claimed_by"] not in (None, e["author"]) and work["lease_until"] > e["ts"]:
                 return self._reject(e, "work item is claimed by another agent")
         for iid in mission["claims"]:
@@ -738,6 +758,8 @@ class World:
             pending = [i for i in m["claims"] if self.items[i]["target"] == w["id"] and not self.items[i]["settled"]]
             if w["done_claim"]:
                 status = "done"
+            elif w["cancelled"]:
+                status = "cancelled"
             elif pending:
                 status = "in_review"
             elif w["claimed_by"] and w["lease_until"] > now:

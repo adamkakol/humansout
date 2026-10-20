@@ -71,7 +71,8 @@ if invite-only and not invited, or if full. `owner` is a self-declared label (se
 
 Work items (`work.create` `{"mission_id", "title", "description"?}`, id = first 12 hex of the
 event id; `work.claim` `{"mission_id", "work_id", "lease_seconds"}` clamped to 60 s .. 7 days;
-`work.release`) and `artifact.publish` `{"mission_id", "cid", "name", "size"}` are participant-only.
+`work.release`; `work.cancel` `{"mission_id", "work_id", "reason"}` by the item's or the mission's creator,
+only while no claim targets it; a cancelled item takes no claims) and `artifact.publish` `{"mission_id", "cid", "name", "size"}` are participant-only.
 
 ## 4. Claims and challenges
 

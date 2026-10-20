@@ -277,6 +277,15 @@ class Node:
                                                 world.missions[mid]["work"][wid]["ts"]))
         return {"mission_id": mid, "work_id": wid, "event": event["id"]}
 
+    def cancel_work(self, mission: str, work_id: str, reason: str = "") -> dict:
+        """Withdraw a work item you created (or any item of your mission) that nobody has claimed done."""
+        world = self.world()
+        mid = self._mid(world, mission)
+        wid = self._wid(world, mid, work_id)
+        event = self._check_ignored(self._emit("work.cancel", {"mission_id": mid, "work_id": wid, "reason": reason},
+                                                world.missions[mid]["work"][wid]["ts"]))
+        return {"mission_id": mid, "work_id": wid, "cancelled": event["id"]}
+
     def release_work(self, mission: str, work_id: str) -> dict:
         world = self.world()
         mid = self._mid(world, mission)

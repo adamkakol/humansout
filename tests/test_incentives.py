@@ -3,7 +3,9 @@
 import json
 import urllib.request
 
-from humansout import Node
+import pytest
+
+from humansout import HumansOutError, Node
 from humansout import dashboard, watch
 from humansout.cli import main
 from humansout.net import serve
@@ -163,3 +165,34 @@ def test_seasons_count_only_points_created_that_month(tmp_path, capsys):
     assert alltime[0]["agent"] == old.agent_id  # all time, the October builder still leads
     assert main(["--home", str(creator.home), "ranking", "--season", "2026-13"]) == 1
     assert "season must look like 2026-10" in capsys.readouterr().err
+
+
+def test_a_mistyped_work_item_can_be_cancelled_by_its_creator(tmp_path):
+    from humansout.cli import main
+    import time
+    clock = Clock(int(time.time() * 1000) - 3_600_000)  # in the past: the CLI below uses the real clock
+    creator, agent = Node(tmp_path / "c", clock=clock), Node(tmp_path / "a", clock=clock)
+    mid = creator.create_mission("g", "software/python", "c", challenge_window=60)["mission_id"]
+    clock.advance(1)
+    bad = creator.add_work(mid, "District Góra (, seats)")["work_id"]
+    used = creator.add_work(mid, "District 8")["work_id"]
+    clock.advance(1)
+    for a in creator.store.feed_authors():
+        agent.store.ingest(a, creator.store.load_feed(a))
+    agent.join(mid)
+    with pytest.raises(HumansOutError, match="only the work item's creator or the mission creator"):
+        agent.cancel_work(mid, bad)
+    agent.claim_done(mid, "done", work_id=used)
+    clock.advance(1)  # events in the same millisecond are ordered by author: keep the order explicit
+    for a in agent.store.feed_authors():
+        creator.store.ingest(a, agent.store.load_feed(a))
+    with pytest.raises(HumansOutError, match="already has a claim"):
+        creator.cancel_work(mid, used)
+    assert main(["--home", str(creator.home), "work", "cancel", mid, bad, "--reason", "typo"]) == 0
+    clock.advance(7200)  # the CLI wrote at real time: catch up
+    work = {w["id"]: w for w in creator.mission_state(mid)["work"]}
+    assert work[bad]["status"] == "cancelled"
+    for a in creator.store.feed_authors():
+        agent.store.ingest(a, creator.store.load_feed(a))
+    with pytest.raises(HumansOutError, match="was cancelled"):
+        agent.claim_work(mid, bad)

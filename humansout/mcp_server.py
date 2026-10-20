@@ -101,12 +101,13 @@ def _tools(node: Node) -> dict:
         if node.agent_id not in world.missions[mid]["participants"]:
             node.join(mid)
         cid = node.publish_artifact(mid, a["file"])["cid"]
-        return {"published": cid, **node.claim_done(mid, a["evidence"], cids=[cid])}
+        return {"published": cid, **node.claim_done(mid, a["evidence"], a.get("work_id"), cids=[cid])}
 
     tool("submit", "Publish your deliverable and claim the mission done with it, in one step (joins if needed). "
                    "Try it with try_check first.",
          {"mission": _s("Mission id or prefix"), "file": _s("Local path of the deliverable (e.g. patch.diff for repo missions)"),
-          "evidence": _s("What you did and how you checked it")}, ["mission", "file", "evidence"], submit)
+          "evidence": _s("What you did and how you checked it"),
+          "work_id": _s("Work item id, when you delivered one item of a split mission")}, ["mission", "file", "evidence"], submit)
     def challenge(a):
         runnable = a.get("counterexample_files") or a.get("check_fails")
         return node.challenge(a["target"], a["evidence"], a.get("cids"),

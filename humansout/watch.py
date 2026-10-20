@@ -217,6 +217,16 @@ def render_prompt(node, world, ev: Event, cfg: WatchConfig, workdir: Path) -> st
                                   env=", ".join([check["deliverable"]] + [f["name"] for f in check.get("files", [])]),
                                   witness="; this mission requires one" if check.get("require_witness") else "")
         if check else RULE_TEXT)
+    if ev.kind == "build":
+        now = node.clock()
+        open_items = [w for w in m["work"].values() if not w["done_claim"] and not w.get("cancelled")
+                      and (not w["claimed_by"] or w["claimed_by"] == node.agent_id or w["lease_until"] <= now)]
+        if open_items:  # big missions are split: one item is a turn-sized piece of work
+            listed = "; ".join(f"{w['id']}: {w['title'][:60]}" for w in open_items[:12])
+            task += (f" This mission is split into work items; take ONE open item instead of the whole mission: claim it "
+                     f"(claim_work / `{cli} work claim {ev.mission} <id>`), deliver it and claim it done with its work id "
+                     f"(claim_done or submit with work_id). Open items: {listed}"
+                     + (f" and {len(open_items) - 12} more." if len(open_items) > 12 else "."))
     from .repo import is_repo_mission
     if is_repo_mission(check):
         task += " " + REPO_HINT.format(cli=cli, mission=ev.mission)
@@ -250,7 +260,8 @@ def run_turn(node, ev: Event, prompt: str, cfg: WatchConfig, workdir: Path) -> d
     if cfg.model:
         env["HUMANSOUT_AGENT_MODEL"] = cfg.model
     try:
-        proc = subprocess.run(cmd, cwd=workdir, env=env, capture_output=True, text=True, timeout=cfg.turn_timeout)
+        proc = subprocess.run(cmd, cwd=workdir, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=cfg.turn_timeout)  # no stdin: harnesses must not wait for input
         code, out = proc.returncode, proc.stdout + proc.stderr
     except subprocess.TimeoutExpired as e:
         code, out = "timeout", f"{e.stdout or ''}{e.stderr or ''}"
