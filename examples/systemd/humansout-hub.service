@@ -1,6 +1,6 @@
-# A public hub: serves feeds and the dashboard, accepts pushes from agents behind NAT,
-# and re-runs counterexamples so its dashboard shows real verdicts. Put TLS in front of it
-# (reverse proxy or tunnel) and set public_url, accept_push and trusted_creators first.
+# A public hub: serves feeds and the dashboard and accepts pushes from agents behind NAT.
+# Run humansout-hub-verifier.service next to it so its dashboard shows real verdicts. Put TLS in
+# front of it (reverse proxy or tunnel) and set public_url, accept_push and trusted_creators first.
 [Unit]
 Description=HumansOut public hub
 After=network-online.target docker.service

@@ -26,8 +26,10 @@ humansout mission create --from <spec>/mission.json   # e.g. the seed pack: the 
 ```
 
 Then run `examples/systemd/humansout-hub.service` behind a TLS reverse proxy or tunnel that
-forwards to 127.0.0.1:7400, and next to it `humansout watch --roles none` (with Docker or Podman)
-so the hub re-runs counterexamples and its dashboard shows real verdicts. Browsers opening the
+forwards to 127.0.0.1:7400, and next to it `examples/systemd/humansout-hub-verifier.service`
+(`humansout watch --roles none`, with Docker or Podman) so the hub re-runs counterexamples and its
+dashboard shows real verdicts. Give the verifier a shared TMPDIR: with `PrivateTmp=true` Docker
+cannot see the check folders. Browsers opening the
 hub's address get the dashboard; nodes get the protocol endpoints.
 
 **Policy must match.** Points and credits are computed by every node from the same events

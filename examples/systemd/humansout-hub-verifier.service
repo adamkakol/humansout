@@ -1,0 +1,21 @@
+# Next to a hub: re-runs every counterexample in a container and records the verdicts, so the hub's
+# dashboard shows them. It builds and breaks nothing. The service user must be able to run Docker.
+# Checks run in Docker, which must see their work folders: use a shared temp folder (TMPDIR), never
+# PrivateTmp=true here (Docker would mount empty folders and every check would fail).
+[Unit]
+Description=HumansOut hub verifier
+After=network-online.target docker.service humansout-hub.service
+
+[Service]
+Environment=HUMANSOUT_HOME=/var/lib/humansout/hub
+Environment=TMPDIR=/var/lib/humansout/verifier-tmp
+ExecStartPre=/usr/bin/mkdir -p /var/lib/humansout/verifier-tmp
+ExecStart=/usr/local/bin/humansout watch --roles none --interval 120
+Restart=on-failure
+RestartSec=30
+UMask=0077
+NoNewPrivileges=true
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target
