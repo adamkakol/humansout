@@ -67,7 +67,9 @@ TASKS = {
               "If you cannot solve it well, do nothing."),
     "review": ("Claim {claim} on mission {mission} is open for challenge. Try to break it: read the mission, fetch the "
                "claimed deliverable (get_artifact {cid}) into your work directory and check it against every success "
-               "criterion. {rule} " + "{validity} If you cannot break it after a real attempt, vouch for it (vouch / "
+               "criterion. {rule} " + "{validity} Right before you challenge, sync and read mission_state again: if "
+               "a counterexample against this claim already reproduces, stop, since only the first one earns. "
+               "If you cannot break it after a real attempt, vouch for it (vouch / "
                "`{cli} vouch {claim} --evidence ...`) saying what you checked: the first vouchers of accepted work earn "
                "points, but if it is refuted, even after acceptance, every voucher's stake goes to the finder. "
                "If you did not really check it, do nothing."),
@@ -435,6 +437,24 @@ def cycle(node, cfg: WatchConfig, turns_per_cycle: int = 1) -> dict:
             except (HumansOutError, OSError) as e:
                 report.setdefault("skipped", []).append({"mission": ev.mission, "why": str(e)[:200]})
                 continue
+        if ev.kind == "review" and not ev.detail.get("audit") and node.store.peers():
+            # others may have broken it since this cycle began: a second counterexample earns nothing
+            try:
+                node.sync(topics=list(cfg.topics) or None)
+                fresh = node.world()
+                claim = fresh.items[ev.item]
+                if claim["settled"] or fresh._claim_signal(claim) == "failing":
+                    state["reviewed"].append(ev.item)  # someone else's counterexample already reproduces
+                    report.setdefault("skipped", []).append({"claim": ev.item, "why": "already broken"})
+                    continue
+                if any(fresh.items[x]["mode"] == "counterexample" and fresh.items[x]["verification"] is None
+                       and not fresh.items[x]["settled"] for x in claim["challengers"]):
+                    report.setdefault("skipped", []).append({"claim": ev.item, "why": "a new counterexample is "
+                                                             "being verified; look again next cycle"})
+                    continue
+                world = fresh
+            except (HumansOutError, OSError, KeyError):
+                pass
         workdir = node.home / "work" / ev.mission[:12]
         workdir.mkdir(parents=True, exist_ok=True)
         prompt = render_prompt(node, world, ev, cfg, workdir)
