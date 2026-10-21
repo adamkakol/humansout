@@ -114,7 +114,8 @@ def _image_python(image: str) -> str:
 
 
 def prepare(node, repo: str | Path, test: list[str], extra: list[str] | None = None, deps: list[str] = (),
-            wheels_dir: str | None = None, image: str | None = None, tracked_only: bool = False) -> dict:
+            wheels_dir: str | None = None, image: str | None = None, tracked_only: bool = False,
+            regression: bool = False) -> dict:
     """Pack the snapshot and write the check files. Nothing is announced."""
     repo = Path(repo).expanduser().resolve()
     if not repo.is_dir():
@@ -143,7 +144,8 @@ def prepare(node, repo: str | Path, test: list[str], extra: list[str] | None = N
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "repo.tar.gz").write_bytes(data)
     (folder / "repo_check.json").write_text(json.dumps(
-        {"deliverable": DELIVERABLE, "test": list(test), "extra": list(extra or ["python", "-m", "unittest"])}, indent=1))
+        {"deliverable": DELIVERABLE, "test": list(test), "extra": list(extra or ["python", "-m", "unittest"]),
+         **({"regression": True} if regression else {})}, indent=1))
     (folder / RUNNER).write_text(resources.files("humansout").joinpath("repo_runner.py").read_text(encoding="utf-8"))
     check = {"command": ["python", f"/work/{RUNNER}"], "deliverable": DELIVERABLE, "image": image,
              "files": [str(folder / n) for n in ("repo.tar.gz", "repo_check.json", RUNNER)]}
@@ -167,14 +169,24 @@ def baseline(node, check: dict, timeout: int) -> tuple[str, str]:
 
 def create(node, repo, goal: str, test: list[str], criteria: str | None = None, category: str = "software/python",
            extra=None, deps=(), wheels_dir=None, image=None, timeout: int = 600, tracked_only: bool = False,
-           require_witness: bool = False, dry_run: bool = False, **mission_kwargs) -> dict:
-    prep = prepare(node, repo, test, extra, deps, wheels_dir, image, tracked_only)
+           require_witness: bool = False, dry_run: bool = False, regression_test: bool = False,
+           **mission_kwargs) -> dict:
+    prep = prepare(node, repo, test, extra, deps, wheels_dir, image, tracked_only, regression=regression_test)
     check = dict(prep["check"], timeout=timeout, require_witness=require_witness)
-    base, output = baseline(node, check, timeout)
+    base_check = check
+    if regression_test:  # an empty patch has no regression test: the baseline runs the plain tests instead
+        plain = Path(tempfile.mkdtemp(prefix="humansout-baseline-")) / "repo_check.json"
+        cfg = json.loads(Path(check["files"][1]).read_text())
+        cfg.pop("regression", None)
+        plain.write_text(json.dumps(cfg))
+        base_check = dict(check, files=[check["files"][0], str(plain), check["files"][2]])
+    base, output = baseline(node, base_check, timeout)
     report = {"files": prep["files"], "bytes": prep["bytes"], "wheels": prep["wheels"],
               "skipped": prep["skipped"][:50], "baseline": base, "baseline_output": output,
               "warnings": list(prep["warnings"])}
-    if base == "passes":
+    if regression_test:
+        report["regression_test"] = "a claim's patch must add a test that fails without its fix"
+    elif base == "passes":
         report["warnings"].append("the tests already pass on the unchanged code: an empty patch would be accepted. "
                                   "Point --test at a test that shows the problem (it should fail now).")
     if dry_run:

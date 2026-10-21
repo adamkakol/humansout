@@ -46,6 +46,9 @@
   - prompts ask agents to add separate problems as new work items, and to tell a claim's author before
     objecting;
   - a turn that delivered nothing holds back only the items the agent took.
+- **`repo mission --require-regression-test`:** a claim's patch must add a test that fails on the unfixed code
+  and passes with the fix, so an empty or unrelated patch cannot pass (the security-review missions' check,
+  built in).
 - **On PyPI:** `pip install humansout`.
 - **Files from many sources, torrent-style** (humansout/swarm.py): nodes serve byte ranges and chunk manifests
   (SHA-256 per 1 MiB); big files arrive in pieces from several sources at once, each piece checked, and a

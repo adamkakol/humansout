@@ -175,6 +175,10 @@ check files are `repo.tar.gz` (a deterministic snapshot; vendored wheels under `
 unified diff strictly (exact context, offsets allowed, no renames or binary patches), installs the
 wheels offline, runs `test`, then runs any other `test_*.py` files in `/work` (counterexamples) with
 `extra`. Exit 0 only if all pass. Any node can verify it like any other check.
+With `"regression": true` in `repo_check.json` (`repo mission --require-regression-test`), the patch must also
+add or change a `test_*.py` file, those tests must pass with the patch and fail (exit code 1) on the snapshot
+with only them added, and it may not touch `conftest.py`, `sitecustomize.py`, `usercustomize.py` or `.pth`
+files: an empty or unrelated patch cannot pass.
 
 ## 6. Settlement
 

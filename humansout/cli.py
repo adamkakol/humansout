@@ -126,6 +126,9 @@ def build_parser() -> argparse.ArgumentParser:
     rm.add_argument("--timeout", type=int, default=600, help="seconds per check run (default 600)")
     rm.add_argument("--tracked-only", action="store_true", help="pack only files git tracks")
     rm.add_argument("--require-witness", action="store_true", help="counterexamples must come with a patch on which they pass")
+    rm.add_argument("--require-regression-test", action="store_true",
+                    help="a claim's patch must add or change a test_*.py that fails without its fix (and passes with "
+                         "it): an empty or unrelated patch cannot pass")
     rm.add_argument("--window", type=int, default=86400, help="challenge window in seconds (default 1 day)")
     rm.add_argument("--dispute-window", type=int)
     rm.add_argument("--points", type=int, default=5)
@@ -414,6 +417,7 @@ def run(args) -> object:
                            category=args.category, extra=shlex.split(args.extra_runner), deps=args.deps,
                            wheels_dir=args.wheels, image=args.image, timeout=args.timeout, tracked_only=args.tracked_only,
                            require_witness=args.require_witness, dry_run=args.dry_run, challenge_window=args.window,
+                           regression_test=args.require_regression_test,
                            dispute_window=args.dispute_window, points_per_claim=args.points,
                            points_per_find=args.find_points, bounty=_bounty_from_args(args))
     if cmd == "challenge":

@@ -284,3 +284,41 @@ def test_unchanged_binary_files_do_not_stop_a_diff(tmp_path):
     (co / "data.zip").write_bytes(b"\xff\xfe" * 10)
     with pytest.raises(HumansOutError, match="not UTF-8 text"):
         repo.diff(node, mid, str(co))
+
+
+@needs_engine
+def test_a_regression_mission_takes_only_a_fix_with_a_test_that_fails_without_it(tmp_path, capsys):
+    """repo mission --require-regression-test: the security-review missions' check, built in. A patch must add a
+    test that fails on the unfixed code and passes with the fix, so an empty or unrelated patch cannot pass."""
+    project = tmp_path / "project"
+    write(project, {
+        "calc/__init__.py": "def add(a, b):\n    return a - b\n",
+        "tests/__init__.py": "",
+        "tests/test_calc.py": "import unittest\nfrom calc import add\n\n\nclass T(unittest.TestCase):\n"
+                              "    def test_zero(self):\n        self.assertEqual(add(0, 0), 0)\n"})
+    creator, builder = Node(tmp_path / "creator"), Node(tmp_path / "builder")
+    assert main(["--home", str(creator.home), "repo", "mission", str(project), "--goal", "Fix add()",
+                 "--test", "python -m unittest discover -s tests -t .", "--require-regression-test"]) == 0
+    created = json.loads(capsys.readouterr().out)
+    assert created["baseline"] == "passes" and "regression_test" in created  # the plain tests pass today
+    mid = created["mission_id"]
+    share(creator, builder)
+    fixed = "def add(a, b):\n    return a + b\n"
+    real_test = ("import unittest\nfrom calc import add\n\n\nclass R(unittest.TestCase):\n"
+                 "    def test_two(self):\n        self.assertEqual(add(2, 2), 4)\n")
+    weak_test = ("import unittest\nfrom calc import add\n\n\nclass W(unittest.TestCase):\n"
+                 "    def test_zero_again(self):\n        self.assertEqual(add(0, 0), 0)\n")
+
+    def attempt(name, files):
+        work = builder.home / "work" / name
+        repo.checkout(builder, mid, str(work))
+        for rel, text in files.items():
+            (work / rel).write_text(text)
+        out = repo.diff(builder, mid, str(work), str(builder.home / "work" / f"{name}.diff"))
+        return builder.try_check(mid, out["written_to"])
+    assert attempt("no-test", {"calc/__init__.py": fixed})["result"] == "fail"
+    assert attempt("weak", {"calc/__init__.py": fixed, "tests/test_weak.py": weak_test})["result"] == "fail"
+    assert attempt("hook", {"calc/__init__.py": fixed, "tests/test_add.py": real_test,
+                            "tests/conftest.py": "collect_ignore = []\n"})["result"] == "fail"
+    good = attempt("good", {"calc/__init__.py": fixed, "tests/test_add.py": real_test})
+    assert good["result"] == "pass" and "fail without the fix and pass with it" in good["output"]

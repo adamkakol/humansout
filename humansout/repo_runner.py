@@ -165,7 +165,56 @@ def main():
         else:
             cmd += [os.path.join(dest, t) for t in tests]
         code = code or subprocess.run(cmd, cwd=REPO, env=env).returncode
+    if not code and cfg.get("regression"):
+        code = regression(cfg, patch, env)
     return 1 if code else 0
+
+
+HOOKS = ("conftest.py", "sitecustomize.py", "usercustomize.py")  # files that change how tests run
+
+
+def _tests_command(runner, root, tests):
+    """The extra runner on these test files: module names for unittest, paths for the others."""
+    cmd = list(runner)
+    if cmd[-1:] == ["unittest"] or cmd[-2:] == ["-m", "unittest"]:
+        return cmd + [t[:-3].replace("/", ".") for t in tests]
+    return cmd + [os.path.join(root, t) for t in tests]
+
+
+def regression(cfg, patch, env):
+    """A bug-fix mission's stronger check (repo mission --require-regression-test): the patch must add or change
+    a test_*.py file, and those tests must fail on the snapshot without the rest of the patch. The test shows the
+    problem, the rest of the patch fixes it: an empty or unrelated patch cannot pass."""
+    changed = sorted({p for old, new, _ in parse(patch) for p in (old, new) if p})
+    hooks = [p for p in changed if os.path.basename(p) in HOOKS or p.endswith(".pth")]
+    if hooks:
+        print(f"humansout: the patch may not change {hooks}: they change how the tests run", file=sys.stderr)
+        return 1
+    tests = [p for p in changed if os.path.basename(p).startswith("test_") and p.endswith(".py")
+             and os.path.exists(os.path.join(REPO, p))]
+    if not tests:
+        print("humansout: this mission asks for a regression test: the patch must add or change a test_*.py file "
+              "that fails without the fix", file=sys.stderr)
+        return 1
+    orig = os.path.join(os.path.dirname(REPO), "orig")
+    shutil.rmtree(orig, ignore_errors=True)
+    with tarfile.open(os.path.join(WORK, "repo.tar.gz")) as tar:
+        tar.extractall(orig, filter="data")
+    for t in tests:
+        os.makedirs(os.path.dirname(os.path.join(orig, t)), exist_ok=True)
+        shutil.copy(os.path.join(REPO, t), os.path.join(orig, t))
+    runner = cfg.get("extra", [sys.executable, "-m", "unittest"])
+    if subprocess.run(_tests_command(runner, REPO, tests), cwd=REPO, env=env).returncode:
+        print("humansout: the patch's tests do not pass with the patch", file=sys.stderr)
+        return 1
+    old_env = dict(env, PYTHONPATH=os.pathsep.join([DEPS, orig]))
+    unfixed = subprocess.run(_tests_command(runner, orig, tests), cwd=orig, env=old_env).returncode
+    if unfixed != 1:  # 0: they pass without the fix; 2 and more: they do not even run there (pytest: collection)
+        print(f"humansout: the patch's tests must fail on the unfixed code (exit code 1); they gave {unfixed}: "
+              "they do not show a problem that the patch fixes", file=sys.stderr)
+        return 1
+    print(f"humansout: regression test: {', '.join(tests)} fail without the fix and pass with it", flush=True)
+    return 0
 
 
 if __name__ == "__main__":
