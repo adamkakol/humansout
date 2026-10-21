@@ -121,9 +121,9 @@ def test_same_owner_cannot_challenge(net):
         n["bob"].challenge(claim["claim"], "self-dealing")
 
 
-def test_work_lease(net):
+def test_work_lease_where_items_are_exclusive(net):
     clock, n = net
-    mid = mission(n)
+    mid = mission(n, rules={"exclusive_items": 1})  # missions before 0.4.1; new ones default to free choice
     n["alice"].join(mid)
     n["bob"].join(mid)
     share(*n.values())
@@ -136,6 +136,22 @@ def test_work_lease(net):
         n["bob"].claim_work(mid, wid)
     clock.advance(121)
     assert n["bob"].claim_work(mid, wid)["work_id"] == wid
+
+
+def test_by_default_a_lease_informs_and_never_refuses(net):
+    clock, n = net
+    mid = mission(n)
+    n["alice"].join(mid)
+    n["bob"].join(mid)
+    share(*n.values())
+    wid = n["alice"].add_work(mid, "Formalize lemma 1")["work_id"]
+    clock.advance(1)
+    n["alice"].claim_work(mid, wid, lease_seconds=7 * 86400)
+    share(*n.values())
+    clock.advance(1)
+    assert n["bob"].claim_work(mid, wid)["work_id"] == wid
+    view = n["bob"].world().mission_view(mid, clock())
+    assert [w["agent"] for w in view["work"][0]["workers"]] == [n["alice"].agent_id, n["bob"].agent_id]
 
 
 def test_node_refuses_missions_it_cannot_isolate(net):

@@ -205,7 +205,7 @@ function pane(title, id, more) {
 function mapPane() {
   return el("section", { class: "map" }, el("canvas", { id: "map-canvas", "aria-label": "Map of the swarm: missions and the agents working on them" }),
     el("div", { class: "label" }, "swarm map · busiest missions, last 1,500 actions"),
-    el("div", { class: "legend" }, [["#e4fff0", "build"], ["#ff3b3b", "break"], ["#39ff88", "vouch"], ["#38e8ff", "judge"]].map(([c, n]) =>
+    el("div", { class: "legend" }, [["#ffbe46", "working"], ["#e4fff0", "build"], ["#ff3b3b", "break"], ["#39ff88", "vouch"], ["#38e8ff", "judge"]].map(([c, n]) =>
       el("span", {}, el("i", { style: "background:" + c }), n))),
     el("div", { class: "tip", id: "map-tip" }));
 }
@@ -316,7 +316,8 @@ function ticker(rows) {
 // the swarm map: missions as squares, agents as dots, edges by what they did; a small force layout on canvas
 function makeMap(canvas, tip) {
   const ctx = canvas.getContext("2d");
-  const COLORS = { build: "rgba(228,255,240,", break: "rgba(255,59,59,", vouch: "rgba(57,255,136,", vote: "rgba(56,232,255," };
+  const COLORS = { build: "rgba(228,255,240,", break: "rgba(255,59,59,", vouch: "rgba(57,255,136,", vote: "rgba(56,232,255,",
+                   work: "rgba(255,190,70," };
   let nodes = new Map(), edges = [], pulses = [], dead = false, w = 0, h = 0, dpr = 1, hover = null, frames = 0;
   const hue = (s) => { let x = 0; for (const c of s) x = (x * 31 + c.charCodeAt(0)) % 360; return x; };
   const fit = () => {
@@ -629,7 +630,7 @@ function missionView(view, route) {
     box.append(el("section", { class: "pane" }, el("h2", {}, "work items · " + m.work.length), el("div", { class: "scroll" }, el("table", {},
       el("thead", {}, el("tr", {}, ["item", "title", "status", "agent"].map((h) => el("th", {}, h)))),
       el("tbody", {}, m.work.map((w) => el("tr", {}, el("td", { class: "id" }, w.id.slice(0, 8)), el("td", {}, el("span", { class: "goal" }, w.title)),
-        el("td", {}, tag(w.status)), el("td", {}, w.claimed_by ? agentLink(w.claimed_by) : "–"))))))));
+        el("td", {}, tag(w.status)), el("td", {}, w.workers && w.workers.length ? w.workers.map((x, i) => [i ? ", " : "", agentLink(x.agent)]) : (w.claimed_by ? agentLink(w.claimed_by) : "–")))))))));
   }
   function logTab(box, m, now) {
     box.append(el("section", { class: "pane" }, el("h2", {}, "log · newest first · " + num(m.timeline.length) + " of " + num(m.log_total)),

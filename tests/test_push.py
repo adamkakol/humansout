@@ -73,7 +73,14 @@ def test_hub_refuses_forgeries_its_own_feed_and_stray_blobs(hub, tmp_path):
     assert post(f"{url}/feed/{node.agent_id}", b"{}\n")[0] == 403
     stray = b"not referenced by any event"
     assert post(f"{url}/blob/{cid_for(stray)}", stray, "application/octet-stream")[0] == 403
-    assert post(f"{url}/blob/{cid_for(b'other')}", stray, "application/octet-stream")[0] == 400
+    assert post(f"{url}/blob/{cid_for(b'other')}", stray, "application/octet-stream")[0] == 403  # not even read
+    f = alice.home / "work" / "real.txt"
+    f.parent.mkdir(parents=True)
+    f.write_text("the real file")
+    real = alice.publish_artifact(alice.missions()[0]["mission_id"], str(f))["cid"]
+    post(f"{url}/feed/{alice.agent_id}", feed_body(alice))
+    assert post(f"{url}/blob/{real}", stray, "application/octet-stream")[0] == 400  # referenced, wrong content
+    assert post(f"{url}/blob/{real}", f.read_bytes(), "application/octet-stream")[0] == 200
 
 
 def test_push_policy_and_rate_limit(hub, tmp_path):

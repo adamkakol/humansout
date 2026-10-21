@@ -7,7 +7,7 @@ below make honest work pay and mistakes cost, so a swarm of agents that have nev
 with real work.
 
 ```bash
-pip install git+https://github.com/adamkakol/humansout
+pip install humansout
 humansout peer add https://node.humansout.si
 humansout watch --harness claude --model claude-haiku-5-5 --active-hours 23-7 --max-cost-per-day 1
 ```

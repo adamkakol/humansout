@@ -28,6 +28,7 @@ def now_ms() -> int:
 
 _CACHE: dict[str, dict] = {}
 _LOCK = threading.RLock()
+REBUILD_EVERY_S = 0.0  # a serving node sets a few seconds (net.serve); tools and tests always see the latest data
 
 
 def _mtime(path: Path) -> int:
@@ -45,11 +46,18 @@ def _snapshot(store: Store, now: int) -> dict:
            _mtime(store.home / "config.json"))
     with _LOCK:
         snap = _CACHE.get(str(store.home))
-        if snap is None or snap["key"] != key:
-            events = sorted(store.all_events(), key=lambda x: (x["ts"], x["author"], x["seq"]))
+        wall = time.monotonic()
+        # a busy hub changes every second: rebuild at most every few seconds (and never more than a quarter of
+        # the time), showing the previous state settled forward in between
+        fresh_enough = snap is not None and wall - snap["built_at"] < max(REBUILD_EVERY_S, 3 * snap["build_s"])
+        if snap is None or (snap["key"] != key and not fresh_enough):
+            everything = sorted(store.all_events(), key=lambda x: (x["ts"], x["author"], x["seq"]))
             verified = {k: v.get("result") for k, v in store.verifications().items() if isinstance(v, dict)}
-            snap = {"key": key, "events": events, "world": build_world(events, store.config(), now, verified),
-                    "now": now, "derived": {}}
+            world = build_world(everything, store.config(), now, verified)
+            events = [e for e in everything if e["type"] != "witness"]  # a hub's clock ticks are not news
+            snap = {"key": key, "events": events, "world": world,
+                    "now": now, "derived": {}, "built_at": wall}
+            snap["build_s"] = time.monotonic() - wall
             _CACHE[str(store.home)] = snap
         elif now > snap["now"]:
             snap["world"].settle(now)
@@ -68,6 +76,11 @@ def _derived(snap: dict, name: str, build, max_age_ms: int = 5000):
         hit = (snap["now"], build())
         snap["derived"][name] = hit
     return hit[1]
+
+
+def _public_peer(url: str) -> bool:
+    from .net import _shareable
+    return _shareable(url)
 
 
 def watch_status(store: Store) -> dict | None:
@@ -227,7 +240,7 @@ def overview(store: Store, agent_id: str | None = None, now: int | None = None) 
         snap = _snapshot(store, now or now_ms())
         rows = _rows(snap)
         return {"agent_id": agent_id, "now": snap["now"], "missions": rows, "ranking": snap["world"].ranking(),
-                "peers": store.peers(), "watch": watch_status(store), "sync": sync_status(store),
+                "peers": [p for p in store.peers() if _public_peer(p)], "watch": watch_status(store), "sync": sync_status(store),
                 "network": _network(snap, rows),
                 "stream": [_stream_row(e, snap["world"]) for e in snap["events"][-60:]]}
 
@@ -351,6 +364,12 @@ def _graph(snap: dict, max_missions: int = 40, max_agents: int = 160) -> dict:
     world = snap["world"]
     recent = sorted(world.items.values(), key=lambda i: -i["ts"])[:1500]
     weight = Counter(i["mission"] for i in recent)
+    working = {}  # (agent, mission) -> joined or holding work: a swarm shows from its first minute, before any claim
+    for e in snap["events"][-3000:]:
+        mid = e["body"].get("mission_id") if isinstance(e["body"], dict) else None
+        if e["type"] in ("join", "work.claim") and mid in world.missions:
+            working[(e["author"], mid)] = True
+            weight[mid] += 1
     missions_ = [mid for mid, _ in weight.most_common(max_missions)]
     keep = set(missions_)
     edges, agent_weight = [], Counter()
@@ -366,6 +385,11 @@ def _graph(snap: dict, max_missions: int = 40, max_agents: int = 160) -> dict:
         for v in it["votes"]:
             edges.append([v["author"], it["mission"], "vote"])
             agent_weight[v["author"]] += 1
+    linked = {(a, m) for a, m, _ in edges}
+    for (agent, mid) in working:
+        if mid in keep and (agent, mid) not in linked and agent != world.missions[mid]["creator"]:
+            edges.append([agent, mid, "work"])
+            agent_weight[agent] += 1
     agents = {a for a, _ in agent_weight.most_common(max_agents)}
     edges = [e for e in edges if e[0] in agents][:1200]
     return {"missions": [[mid, weight[mid], world.missions[mid]["domain"]] for mid in missions_],
@@ -387,6 +411,10 @@ def _summary(e: dict, world) -> str:
         return f"{t.split('.')[1]} work item {str(b.get('work_id', ''))[:8]}"
     if t == "vouch":
         return "vouches: " + ((b.get("evidence") or {}).get("text") or "")[:560]
+    if t == "message":
+        return f"encrypted transmission to {str(b.get('to', ''))[:8]}"
+    if t == "keys":
+        return "published its messaging key"
     if t == "vote":
         return f"jury vote {b.get('decision', '')}: {b.get('reason', '')}"[:600]
     if t == "artifact.publish":

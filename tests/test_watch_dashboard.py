@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from humansout import Node, sandbox
+from humansout import HumansOutError, Node, sandbox
 from humansout import watch
 from humansout.net import serve
 
@@ -77,8 +77,11 @@ def test_find_work_orders_and_filters(tmp_path):
     claim = alice.claim_done(mid, "v1", cids=[cid])["claim"]
     share(creator, alice, bob)
     bob_events = watch.find_work(bob.world(), bob.agent_id, clock(), cfg, watch.load_state(bob.home))
-    # one result per target: bob reviews alice's claim instead of building the same mission while it may win
-    assert [(e.kind, e.item or e.mission) for e in bob_events] == [("review", claim)]
+    # free choice: bob is offered review first, and building too; the prompt tells him alice's claim may win
+    assert [(e.kind, e.item or e.mission) for e in bob_events] == [("review", claim), ("build", mid)]
+    build = next(e for e in bob_events if e.kind == "build")
+    assert "Claims by others: a claim by agent " + alice.agent_id[:8] in watch.render_prompt(
+        bob, bob.world(), build, watch.WatchConfig(), tmp_path)
     assert watch.find_work(alice.world(), alice.agent_id, clock(), cfg, watch.load_state(alice.home)) == []
 
     clock.advance(1)
@@ -353,7 +356,8 @@ def test_build_prompts_offer_one_open_work_item(tmp_path):
     world = me.world()
     ev = watch.find_work(world, me.agent_id, clock(), watch.WatchConfig(roles=("build",)), watch.load_state(me.home))[0]
     prompt = watch.render_prompt(me, world, ev, watch.WatchConfig(), tmp_path)
-    assert "take ONE open item" in prompt and all(f"{w}: District" in prompt for w in items)
+    assert ev.detail["suggested"] in items and f"Suggested for you, as the least crowded: {ev.detail['suggested']}" in prompt
+    assert all(f"{w}: District" in prompt for w in items) and "nobody can stop anyone" in prompt
     from humansout.agent import LocalAgent
     me.store.set_config("agent_api", "http://127.0.0.1:9/v1")
     me.store.set_config("agent_model", "m")
@@ -362,4 +366,111 @@ def test_build_prompts_offer_one_open_work_item(tmp_path):
     agent.call("write_file", {"name": "slugify.py", "content": "def slugify(s):\n    return s\n"})
     claim = agent.call("submit", {"mission": mid, "name": "slugify.py", "evidence": "district 2", "work_id": items[1]})
     world = me.world()
-    assert world.items[claim["claim"]]["target"] == items[1] and world.missions[mid]["work"][items[1]]["claimed_by"] == me.agent_id
+    assert world.items[claim["claim"]]["target"] == items[1] and me.agent_id in world.missions[mid]["work"][items[1]]["workers"]
+
+
+def test_harness_tools_start_from_this_installation_even_off_path(tmp_path, monkeypatch):
+    """A venv that is not activated: `humansout` is not on PATH, and the MCP server must still start."""
+    import subprocess
+    import sys
+    from humansout import watch
+    monkeypatch.setenv("PATH", "/nonexistent")
+    cfg = watch.WatchConfig(harness=None)
+    assert cfg.cli[:1] == [sys.executable]
+    import os
+    env = {"PATH": "/nonexistent", "HOME": str(tmp_path),  # however this interpreter finds the package, it still does
+           **({"PYTHONPATH": os.environ["PYTHONPATH"]} if os.environ.get("PYTHONPATH") else {})}
+    out = subprocess.run([*cfg.cli, "--home", str(tmp_path / "n"), "whoami"], capture_output=True, text=True,
+                         env=env, timeout=60)
+    assert out.returncode == 0 and "agent_id" in out.stdout
+
+
+def test_the_swarm_map_shows_a_mission_from_its_first_joins(tmp_path):
+    """The security-review mission had three agents working and no claim yet: it was missing from the map."""
+    from humansout import dashboard
+    creator = Node(tmp_path / "creator")
+    mid = creator.create_mission("Security review", "security/x", "c")["mission_id"]
+    wid = creator.add_work(mid, "area one")["work_id"]
+    agents = []
+    for name in ("a", "b"):
+        n = Node(tmp_path / name)
+        n.store.ingest(creator.agent_id, creator.store.load_feed(creator.agent_id))
+        n.join(mid)
+        creator.store.ingest(n.agent_id, n.store.load_feed(n.agent_id))
+        agents.append(n)
+    agents[0].claim_work(mid, wid)
+    creator.store.ingest(agents[0].agent_id, agents[0].store.load_feed(agents[0].agent_id))
+    graph = dashboard.home(creator.store)["graph"]
+    assert [m[0] for m in graph["missions"]] == [mid]
+    assert sorted((a, m, k) for a, m, k in graph["edges"]) == sorted((n.agent_id, mid, "work") for n in agents)
+
+
+
+def test_agents_choose_freely_and_see_who_works_on_what(tmp_path):
+    """Adam: no limits a malicious agent could use to block others (one agent leasing every item); agents choose
+    any item, see who works on it, since when and how good they are, and the first correct claim earns."""
+    clock = Clock()
+    creator = Node(tmp_path / "c", clock=clock)
+    mid = creator.create_mission("Review", "security/x", "c")["mission_id"]
+    items = []
+    for n in range(5):
+        clock.advance(1)
+        items.append(creator.add_work(mid, f"area {n}")["work_id"])
+    hog, a, b = (Node(tmp_path / n, clock=clock) for n in ("hog", "a", "b"))
+    for x in (hog, a, b):
+        share(creator, x)
+        clock.advance(1)
+        x.join(mid)
+    for wid in items:  # one agent takes every item for a week
+        hog.claim_work(mid, wid, lease_seconds=7 * 86400)
+    everyone = [creator, hog, a, b]
+    for x in everyone:
+        for y in everyone:
+            if x is not y:
+                share(x, y)
+    clock.advance(60)
+    picks = []
+    for x in (a, b):  # nobody is blocked: both are offered work, and suggested different items
+        ev = next(e for e in watch.find_work(x.world(), x.agent_id, clock(), watch.WatchConfig(roles=("build",)),
+                                             watch.load_state(x.home)) if e.kind == "build")
+        picks.append(ev.detail["suggested"])
+        prompt = watch.render_prompt(x, x.world(), ev, watch.WatchConfig(), tmp_path)
+        assert f"agent {hog.agent_id[:8]} (built 0, found 0, refuted 0) for 1 min" in prompt
+    assert picks[0] != picks[1]
+    a.claim_work(mid, items[0])  # leases never refuse: a works on the hog's item anyway, and both are listed
+    share(a, b)
+    work = b.world().missions[mid]["work"][items[0]]
+    assert set(work["workers"]) == {hog.agent_id, a.agent_id}
+    claim = a.claim_done(mid, "fixed area 0", work_id=items[0])["claim"]  # and its claim counts
+    assert a.world().items[claim]["target"] == items[0]
+    for x in (a, creator):
+        share(x, b)
+    clock.advance(1)
+    b.review_lease(claim)
+    share(b, hog)
+    clock.advance(1)
+    hog.review_lease(claim)  # reviewers are never refused either; the others see them in their prompt
+    share(hog, creator)
+    rev = next(e for e in watch.find_work(creator.world(), "f" * 64, clock(), watch.WatchConfig(roles=("break",)),
+                                          watch.load_state(tmp_path / "nobody")) if e.kind == "review")
+    text = watch.render_prompt(creator, creator.world(), rev, watch.WatchConfig(), tmp_path)
+    assert f"agent {b.agent_id[:8]}" in text and f"agent {hog.agent_id[:8]}" in text
+
+
+def test_a_build_that_delivered_nothing_holds_back_only_its_own_item(tmp_path):
+    """Found in the security-review swarm: one unproductive turn on one item kept an agent off all eight others
+    for an hour."""
+    clock = Clock()
+    creator, me = Node(tmp_path / "c", clock=clock), Node(tmp_path / "me", clock=clock)
+    mid = creator.create_mission("Review", "security/x", "c")["mission_id"]
+    for n in range(3):
+        clock.advance(1)
+        creator.add_work(mid, f"area {n}")
+    share(creator, me)
+    state = watch.load_state(me.home)
+    cfg = watch.WatchConfig(roles=("build",))
+    first = next(e for e in watch.find_work(me.world(), me.agent_id, clock(), cfg, state) if e.kind == "build")
+    state["built"][f"{mid}:{first.detail['suggested']}"] = {"attempts": 1, "at": clock()}  # took it, claimed nothing
+    clock.advance(60)
+    second = next(e for e in watch.find_work(me.world(), me.agent_id, clock(), cfg, state) if e.kind == "build")
+    assert second.detail["suggested"] != first.detail["suggested"]

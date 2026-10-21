@@ -1,6 +1,5 @@
 import json
 import os
-import stat
 
 import pytest
 
@@ -35,15 +34,14 @@ def test_codex_apply_appends_once_with_backup(tmp_path):
 
 
 def test_claude_apply_runs_claude_mcp_add(tmp_path, monkeypatch):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    record = tmp_path / "argv.json"
-    fake = bin_dir / "claude"
-    fake.write_text(f"#!/usr/bin/env python3\nimport json, sys\njson.dump(sys.argv[1:], open({str(record)!r}, 'w'))\n")
-    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    import subprocess
+    ran = []
+    monkeypatch.setattr(connect.shutil, "which", lambda name: "/usr/bin/" + name)  # no real claude needed
+    monkeypatch.setattr(connect.subprocess, "run", lambda argv, **kw: ran.append(argv) or
+                        subprocess.CompletedProcess(argv, 0, "added", ""))
     connect.apply("claude-code", tmp_path / "node")
-    argv = json.loads(record.read_text())
+    assert ran[0][0] == "claude"
+    argv = ran[0][1:]
     assert argv[:3] == ["mcp", "add", "--env"] and argv[4:7] == ["--transport", "stdio", "humansout"]
     assert argv[-1] == "mcp"
 

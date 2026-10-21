@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -73,6 +74,8 @@ def event_cids(event: dict) -> set[str]:
     b = event["body"]
     if isinstance(b.get("cid"), str):
         out.add(b["cid"])
+    if event.get("type") == "message":  # the sealed payloads: kept until the message expires
+        out.update(b[k] for k in ("box", "self") if isinstance(b.get(k), str))
     evidence = b.get("evidence") if isinstance(b.get("evidence"), dict) else {}
     out.update(c for c in (evidence.get("cids") or []) if isinstance(c, str))
     manifest = b.get("manifest") if isinstance(b.get("manifest"), dict) else {}
@@ -158,7 +161,8 @@ def public_host(url: str) -> bool:
         return False
     for address in addresses:
         ip = ipaddress.ip_address(address.split("%")[0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+        ip = getattr(ip, "ipv4_mapped", None) or ip
+        if not ip.is_global:  # private, loopback, link-local, carrier-grade NAT (100.64/10), reserved, ...
             return False
     return bool(addresses)
 
@@ -171,6 +175,7 @@ class Store:
         self.feeds_dir.mkdir(parents=True, exist_ok=True)
         self.blobs_dir.mkdir(parents=True, exist_ok=True)
         self._feed_cache: dict[str, tuple] = {}  # path -> (mtime_ns, size, verified events)
+        self._blob_ok: dict[str, tuple[int, int]] = {}  # cid -> (mtime_ns, size) of a file that matched its id
         self._lock = threading.RLock()           # appends and index updates (HTTP handlers and sync threads share a store)
         self._changed = threading.Condition()    # notified after every append (long-polling peers wait on it)
         self._reset_index()
@@ -215,10 +220,27 @@ class Store:
         with self._lock:
             peers = self.peers()
             if url in peers:
+                if not learned and url in self._learned():  # the owner adds it: trusted from now on
+                    (self.home / "learned_peers.json").write_text(json.dumps([u for u in self._learned() if u != url]))
                 return False
             peers.append(url)
             (self.home / "peers.json").write_text(json.dumps(peers[-200:], indent=2))
+            if learned:  # remembered as learned: reached only at public addresses (net.urlopen public_only)
+                path = self.home / "learned_peers.json"
+                known = [u for u in self._learned() if u in peers]
+                path.write_text(json.dumps((known + [url])[-200:], indent=2))
         return True
+
+    def _learned(self) -> list[str]:
+        try:
+            raw = json.loads((self.home / "learned_peers.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            return []
+        return [u for u in raw if isinstance(u, str)] if isinstance(raw, list) else []
+
+    def is_learned(self, url: str) -> bool:
+        """A peer this node heard of from other peers, not one its owner added (unless private peers are allowed)."""
+        return not self.config().get("allow_private_peers", False) and normalize_peer(url) in self._learned()
 
     # ---- feeds ------------------------------------------------------------
     def feed_path(self, author: str) -> Path:
@@ -366,13 +388,17 @@ class Store:
         self._ix_items: dict[str, str] = {}      # claim or challenge id -> its mission
         self._ix_pending: list[dict] = []        # objections whose target is not known yet
         self._ix_referenced: set[str] = set()
+        self._ix_content: set[str] = set()      # referenced by something other than a message (artifacts, files)
         self._ix_version = 0
         self._ix_views: dict = {}                # rendered answers for the current version
         self._ix_dirty: set[str] = set()         # feeds this process appended to since the last refresh
         self._ix_scanned_at = float("-inf")      # last full directory scan (finds other processes' appends)
 
     def _index_event(self, e: dict) -> None:
-        self._ix_referenced.update(event_cids(e))
+        cids = event_cids(e)
+        self._ix_referenced.update(cids)
+        if e["type"] != "message":
+            self._ix_content.update(cids)
         mid = event_mission(e)
         if mid is None:
             target = e["body"].get("target")
@@ -450,7 +476,7 @@ class Store:
                     progress = True
                 else:
                     waiting.append(e)
-            self._ix_pending = waiting[-100_000:]
+            self._ix_pending = waiting[-20_000:]  # objections to unknown targets: bounded (each may be 64 KB)
 
     def _view(self, key, render) -> tuple[bytes, str]:
         """A rendered JSON answer and its ETag, computed once per index version."""
@@ -506,6 +532,18 @@ class Store:
             self.refresh_index()
             return set(self._ix_referenced)
 
+    def payload_only(self, cid: str) -> bool:
+        """Named only as a message's sealed payload: small, and deleted when the message expires."""
+        with self._lock:
+            self.refresh_index()
+            return cid in self._ix_referenced and cid not in self._ix_content
+
+    def content_cids(self) -> set[str]:
+        """Files some event other than a message needs: never deleted by message expiry."""
+        with self._lock:
+            self.refresh_index()
+            return set(self._ix_content)
+
     def wait_for_change(self, current_etag, since: str, timeout: float) -> str:
         """Block until `current_etag()` differs from `since` or `timeout` seconds pass; returns the latest ETag.
         Appends by this process wake waiters at once; other processes' appends are seen within a second."""
@@ -536,6 +574,16 @@ class Store:
                 json.dump(data, f, separators=(",", ":"))
             os.replace(tmp, self.home / "netcache.json")
 
+    def room_for(self, nbytes: int) -> bool:
+        """Writes that come from the network stop before they fill the disk: min_free_disk_mb stays free (or a
+        tenth of the disk, if that is less: a small disk would otherwise refuse everything)."""
+        try:
+            usage = shutil.disk_usage(self.home)
+        except OSError:
+            return True
+        floor = min(int(self.config().get("min_free_disk_mb", 1024)) << 20, usage.total // 10)
+        return usage.free - max(0, nbytes) >= floor
+
     # ---- blobs --------------------------------------------------------------
     def blob_path(self, cid: str) -> Path:
         if not CID_RE.match(cid):
@@ -555,11 +603,64 @@ class Store:
             os.replace(tmp, path)
         return cid
 
+    def delete_blob(self, cid: str) -> bool:
+        """Only for payloads that expired (sealed messages): content that events still need is never deleted."""
+        try:
+            self.blob_path(cid).unlink()
+            return True
+        except FileNotFoundError:
+            return False
+
     def get_blob(self, cid: str) -> bytes | None:
         if not self.has_blob(cid):
             return None
-        data = self.blob_path(cid).read_bytes()
-        return data if cid_for(data) == cid else None
+        path = self.blob_path(cid)
+        try:
+            key = self._blob_key(path)
+            data = path.read_bytes()
+        except FileNotFoundError:
+            return None
+        if self._blob_ok.get(cid) == key:
+            return data
+        if cid_for(data) != cid:
+            return None
+        self._remember_ok(cid, key)
+        return data
+
+    def read_blob_range(self, cid: str, start: int, end: int | None) -> tuple[bytes, int] | None:
+        """Bytes start..end (inclusive) of a blob and its size, read from the file: a piece of a 50 MB file costs
+        that piece, not a read and a hash of the whole file per request. None if missing or corrupt."""
+        if not self.has_blob(cid):
+            return None
+        path = self.blob_path(cid)
+        try:
+            key = self._blob_key(path)
+            if self._blob_ok.get(cid) != key:
+                digest = hashlib.sha256()
+                with path.open("rb") as f:
+                    for chunk in iter(lambda: f.read(1 << 20), b""):
+                        digest.update(chunk)
+                if "sha256-" + digest.hexdigest() != cid:
+                    return None
+                self._remember_ok(cid, key)
+            size = key[1]
+            last = size - 1 if end is None else min(end, size - 1)
+            with path.open("rb") as f:
+                f.seek(start)
+                return f.read(max(0, last - start + 1)), size
+        except FileNotFoundError:
+            return None
+
+    @staticmethod
+    def _blob_key(path: Path) -> tuple[int, int]:
+        st = path.stat()
+        return st.st_mtime_ns, st.st_size
+
+    def _remember_ok(self, cid: str, key: tuple[int, int]) -> None:
+        """A blob whose content matched its id, until the file changes."""
+        if len(self._blob_ok) > 100_000:
+            self._blob_ok.clear()
+        self._blob_ok[cid] = key
 
     # ---- local verification results -----------------------------------------
     # Results of re-running checks and counterexamples on this node. They are local

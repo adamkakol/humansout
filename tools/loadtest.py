@@ -254,11 +254,13 @@ class Meter:
             meter.record(url, 200, len(data))
             return data
 
-        def counted_post(url, data, ctype):
-            status, reply = post(url, data, ctype)
+        def counted_post(url, data, ctype, *a, **kw):
+            status, reply = post(url, data, ctype, *a, **kw)
             meter.record(url, status, len(reply), len(data), "POST")
             return status, reply
         module._get, module._post = counted_get, counted_post
+        self.restore = lambda: setattr(module, "_get", get) or setattr(module, "_post", post) or (
+            conditional and setattr(module, "_get_conditional", conditional))
         if conditional:
             def counted_conditional(url, etag, *a, **kw):
                 out = conditional(url, etag, *a, **kw)
@@ -415,6 +417,8 @@ def run_swarm_config(base: Path, work: Path, plan: dict, mode: str, rounds: int,
                  "wall_s": round(time.perf_counter() - t0, 1), "feeds": len(fresh.known)}
         return {"mode": mode, "rounds": results, "newcomer_first_sync": first, "hub_rss_mb": proc_rss_mb(proc.pid)}
     finally:
+        if "meter" in locals() and hasattr(meter, "restore"):
+            meter.restore()  # the client functions are module globals: put them back for whoever runs next
         proc.terminate()
         proc.wait(10)
 

@@ -199,10 +199,25 @@ def _snapshot(node, mission: str) -> tuple[str, bytes]:
     return mid, data
 
 
+MAX_UNPACKED_BYTES, MAX_MEMBERS = 1 << 30, 100_000  # a 50 MB snapshot cannot unpack into the whole disk
+
+
+def _bounded(tar: tarfile.TarFile) -> list[tarfile.TarInfo]:
+    """The snapshot's entries, refused if they would unpack into more than MAX_UNPACKED_BYTES (a gzip bomb)."""
+    members, total = [], 0
+    for m in tar:
+        members.append(m)
+        total += max(0, m.size)
+        if total > MAX_UNPACKED_BYTES or len(members) > MAX_MEMBERS:
+            raise HumansOutError(f"the snapshot unpacks into more than {MAX_UNPACKED_BYTES >> 20} MB or "
+                                 f"{MAX_MEMBERS} files: refused")
+    return members
+
+
 def _members(data: bytes) -> dict[str, bytes]:
     out = {}
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-        for m in tar.getmembers():
+        for m in _bounded(tar):
             if m.isfile() and not m.name.startswith(".humansout/"):
                 out[m.name] = tar.extractfile(m).read()
     return out
@@ -217,7 +232,7 @@ def checkout(node, mission: str, dest: str) -> dict:
     mid, data = _snapshot(node, mission)
     path.mkdir(parents=True, exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-        members = [m for m in tar.getmembers() if not m.name.startswith(".humansout/")]
+        members = [m for m in _bounded(tar) if not m.name.startswith(".humansout/")]
         if hasattr(tarfile, "data_filter"):
             tar.extractall(path, members=members, filter="data")
         else:  # Python releases before the extraction filters: allow only plain files at safe paths

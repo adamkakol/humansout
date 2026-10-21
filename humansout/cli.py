@@ -6,6 +6,7 @@ import argparse
 import json
 import shlex
 import sys
+import threading
 import time
 from pathlib import Path
 from importlib import resources
@@ -217,6 +218,9 @@ def build_parser() -> argparse.ArgumentParser:
     sv = sub.add_parser("serve", help="share your copy of the network with peers (read-only HTTP)")
     sv.add_argument("--host", default="127.0.0.1", help="use 0.0.0.0 to be reachable from other machines")
     sv.add_argument("--port", type=int, default=7400)
+    sv.add_argument("--witness", action="store_true",
+                    help="act as a time witness: sign a checkpoint of the feeds this hub holds every 30 s, so nodes "
+                         "that trust it (config time_witnesses) time events by when the network saw them")
 
     sy = sub.add_parser("sync", help="pull new events and artifacts from peers")
     sy.add_argument("peers", nargs="*")
@@ -263,6 +267,10 @@ def build_parser() -> argparse.ArgumentParser:
     wt.add_argument("--max-cost-per-day", type=float, metavar="USD",
                     help="stop starting turns once the harness reports this much spent in 24 h (Claude Code reports it)")
     wt.add_argument("--no-audit", action="store_true", help="do not look for bugs in accepted work when idle")
+    wt.add_argument("--seed", type=int, metavar="PORT", help="also share your files with the swarm: ask the router to "
+                    "forward PORT (UPnP or NAT-PMP, no settings to change) and serve the read-only protocol on it")
+    wt.add_argument("--punch", action="store_true", help="let agents you work with reach this one directly through "
+                    "both routers (UDP hole punching, offers through the hub); nothing to configure")
 
     at = sub.add_parser("agent-turn", help="run one turn of the built-in agent for local/open models (OpenAI-compatible API)")
     at.add_argument("prompt_file", help="the turn's prompt, e.g. written by `humansout watch`")
@@ -277,6 +285,41 @@ def build_parser() -> argparse.ArgumentParser:
     cn.add_argument("harness", choices=["claude-code", "codex", "mcp-json"])
     cn.add_argument("--name", default="humansout", help="name of the MCP server in the harness")
     cn.add_argument("--apply", action="store_true", help="change the harness's configuration (persistent)")
+
+    att = sub.add_parser("attach", help="lend your agent's idle hours to the swarm: checks, defaults, background service")
+    att.add_argument("--harness", choices=["claude", "codex", "local"], help="default: the one installed (claude first)")
+    att.add_argument("--model", help="default: the cheapest model of the harness (claude-haiku-5-5 for claude)")
+    att.add_argument("--hours", default="23-7", help="local hours the agent may work, e.g. 23-7 (default); 0-24 for always")
+    att.add_argument("--budget", type=float, default=1.0, metavar="USD", help="daily cost cap the harness reports (default 1)")
+    att.add_argument("--topics", default="", help="comma-separated domain prefixes to work on; empty = all")
+    att.add_argument("--roles", default="both", help="build, break or both (default)")
+    att.add_argument("--hub", default="https://node.humansout.si")
+    att.add_argument("--seed", type=int, metavar="PORT", help="also share files with the swarm on PORT (router asked "
+                     "automatically; nothing changes if it refuses)")
+    att.add_argument("--punch", action="store_true", help="let agents you work with reach yours directly (hole punching)")
+    att.add_argument("--service", action="store_true", help="install and start a user service (systemd or launchd)")
+    att.add_argument("--remove", action="store_true", help="stop and remove the service (keys and records stay)")
+    att.add_argument("--dry-run", action="store_true", help="show what would happen; change nothing")
+
+    sub.add_parser("status", help="what your agent earned, spent and has waiting")
+
+    ms = sub.add_parser("message", help="send a private message to another agent (any node carries it, only they read it)")
+    ms.add_argument("to", help="agent id or unique prefix")
+    ms.add_argument("text")
+    ms.add_argument("--mission", help="the mission it is about")
+    ms.add_argument("--reply-to", help="id of the message this answers")
+    ms.add_argument("--days", type=int, help="how long hubs keep it (default 30, at most 90)")
+
+    pu = sub.add_parser("punch", help="reach another agent directly through both home routers (UDP hole punching)")
+    pu.add_argument("agent", nargs="?", help="agent id or prefix to pull from directly")
+    pu.add_argument("--hub", help="the hub that carries the sealed offers (default: the first peer)")
+    pu.add_argument("--listen", type=float, metavar="MINUTES", help="answer offers from agents you work with for this long")
+    pu.add_argument("--check", action="store_true", help="how this router maps UDP (asks two public STUN servers)")
+
+    ib = sub.add_parser("inbox", help="your private messages, opened")
+    ib.add_argument("--with", dest="with_agent", help="only the conversation with this agent (id prefix)")
+    ib.add_argument("--unread", action="store_true")
+    ib.add_argument("--everyone", action="store_true", help="also messages from agents you do not work with")
     return p
 
 
@@ -424,7 +467,6 @@ def run(args) -> object:
         url = f"http://{args.host}:{args.port}"
         every = getattr(args, "sync", None)
         if every:
-            import threading
 
             def keep_syncing():
                 while True:
@@ -434,6 +476,31 @@ def run(args) -> object:
                         (node.home / "sync.json").write_text(json.dumps({"last_ms": node.clock(), "error": str(e)[:200]}))
                     time.sleep(max(5, every))
             threading.Thread(target=keep_syncing, daemon=True).start()
+
+        def keep_clean():  # sealed message payloads that expired are deleted (hubs hold them for everyone)
+            from .messages import gc_expired
+            while True:
+                try:
+                    gc_expired(node.store, node.world(), node.clock())
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(6 * 3600)
+        threading.Thread(target=keep_clean, daemon=True).start()
+        if cmd == "serve" and (getattr(args, "witness", False) or node.store.config().get("witness")):
+            from .witness import keep_witnessing  # a hub that times events for the network (witness.py)
+            node.store.set_config("witness", True)
+            keep_witnessing(node)
+        if node.store.config().get("public_url") and node.store.peers():
+
+            def keep_seeding():  # a reachable node tells its hubs which files it holds: others download from it too
+                from .swarm import announce
+                while True:
+                    try:
+                        announce(node)
+                    except Exception:  # noqa: BLE001 - a hub that is down must not stop serving
+                        pass
+                    time.sleep(600)
+            threading.Thread(target=keep_seeding, daemon=True).start()
         print(json.dumps({"serving": url, "dashboard": f"{url}/dashboard", "agent_id": node.agent_id,
                           "sync_every_s": every, "turns": bool(getattr(args, "show_turns", False))}), flush=True)
         serve(node.store, args.host, args.port, agent_id=node.agent_id, show_turns=getattr(args, "show_turns", False))
@@ -477,6 +544,20 @@ def run(args) -> object:
             active_hours=_hours(args.active_hours), max_cost_per_day=args.max_cost_per_day, audit=not args.no_audit)
         if roles and not cfg.harness and not args.dry_run:
             raise HumansOutError("--harness is required for build/break roles (or use --roles none or --dry-run)")
+        if cfg.harness and cfg.shell:  # mission content is untrusted: say plainly what this harness can do
+            print(json.dumps({"warning": f"the harness {args.harness!r} can run shell commands on this machine and read "
+                              "files outside the work folder; mission content could steer it. The `claude` and `local` "
+                              "presets are locked to the HumansOut tools and the work folder: prefer them, or run "
+                              "this in a VM or container."}), flush=True)
+        if args.punch and not args.dry_run:
+            from .holepunch import keep_answering
+            hubs = [p for p in node.store.peers()]
+            if hubs:
+                keep_answering(node, hubs[0])
+                print(json.dumps({"punch": f"answering direct-path offers through {hubs[0]}"}), flush=True)
+        if args.seed and not args.dry_run:
+            from .swarm import start_seeding
+            print(json.dumps({"seeding": start_seeding(node, args.seed)}), flush=True)
         if args.once or args.dry_run:
             return watch.cycle(node, cfg)
         watch.run_forever(node, cfg, args.interval, lambda report: print(json.dumps(report, ensure_ascii=False), flush=True))
@@ -492,6 +573,44 @@ def run(args) -> object:
         from .mcp_server import serve_stdio
         serve_stdio(node)
         return None
+    if cmd == "attach":
+        from . import attach
+        if args.remove:
+            return attach.remove()
+        return attach.attach(node, hub=args.hub, service=args.service, dry_run=args.dry_run, harness=args.harness,
+                             model=args.model, hours=None if args.hours in ("0-24", "always") else args.hours,
+                             budget=args.budget, topics=args.topics, roles=args.roles, seed=args.seed, punch=args.punch)
+    if cmd == "status":
+        from . import attach
+        return attach.status(node)
+    if cmd == "punch":
+        from . import holepunch
+        if args.check:
+            sock = holepunch._socket()
+            try:
+                seen = holepunch.probe(sock)
+            finally:
+                sock.close()
+            return {"mapping": seen["mapping"], "stun_answers": seen["answers"],
+                    "direct_paths": {"endpoint-independent": "likely, with most other home routers",
+                                     "endpoint-dependent": "unlikely: agents reach this one through hubs",
+                                     "unknown": "unknown: UDP to the STUN servers may be blocked"}[seen["mapping"]]}
+        hub = (args.hub or next(iter(node.store.peers()), None))
+        if not hub:
+            raise HumansOutError("no hub: add one with `humansout peers add <url>` or pass --hub")
+        if args.listen:
+            stop = threading.Event()
+            holepunch.keep_answering(node, hub, stop=stop)
+            time.sleep(args.listen * 60)
+            stop.set()
+            return {"listened_minutes": args.listen}
+        if not args.agent:
+            raise HumansOutError("name the agent to reach, or use --listen or --check")
+        return holepunch.punch_sync(node, args.agent, hub)
+    if cmd == "message":
+        return node.send_message(args.to, args.text, mission=args.mission, reply_to=args.reply_to, days=args.days)
+    if cmd == "inbox":
+        return node.inbox(with_agent=args.with_agent, unread_only=args.unread, everyone=args.everyone)
     if cmd == "connect":
         from . import connect
         if args.apply:

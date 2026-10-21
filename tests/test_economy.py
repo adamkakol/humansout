@@ -295,3 +295,28 @@ def test_idle_agents_audit_accepted_work_with_their_own_prompt(net, tmp_path):
     assert "was accepted" in prompt and "counterexample posted against other claims" in prompt.replace("\n", " ") or \
         "every counterexample" in prompt
     assert "vouch for it" not in prompt
+
+
+def test_jurors_with_earned_reputation_in_the_domain_sit_first(tmp_path):
+    """Keys made to join one mission cannot outvote agents who did real work in the field."""
+    net = Net(tmp_path, jury_size=1)
+    earlier = net.claim("dave", "v = 0")  # dave's work is accepted: he has earned reputation in software/python
+    net.tick(200)
+    assert net.status(earlier) == "accepted"
+    test = tmp_path / "test_other.py"
+    test.write_text("import unittest\n")
+    other = net.n["creator"].create_mission(
+        "Another", "software/python", "c", challenge_window=100, dispute_window=5, rules={"jury_size": 1},
+        check={"command": ["python", "-m", "unittest"], "deliverable": "slugify.py", "files": [str(test)]})["mission_id"]
+    net.sync()
+    for who in ("alice", "carol", "erin", "frank"):  # dave never joins this mission
+        net.tick()
+        net.n[who].join(other)
+    net.sync()
+    net.mid = other
+    claim = net.claim("alice", "w = 1")
+    ce = net.counterexample("carol", claim)
+    net.tick()
+    net.n["alice"].dispute(ce, "the test expects what the mission never asks")
+    net.sync()
+    assert net.world().items[ce]["jury"] == [net.n["dave"].agent_id]

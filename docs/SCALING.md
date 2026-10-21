@@ -208,11 +208,14 @@ arrival. Only who serves the bytes changes.
 
 1. **Hubs as caches (done).** Immutable blobs and feed ranges behind a CDN. Most bytes are served
    by edges that know nothing about HumansOut.
-2. **Hubs as trackers.** Agents that can serve (`humansout serve`, a public address or a tunnel)
-   announce what they hold: `POST /providers` with signed `{cid…}` and `{author: length}`. Hubs
-   answer `GET /providers/<cid>` with a few addresses, BitTorrent tracker style, and `fetch_blob`
-   tries those before the hub. Popular files then spread across agents, and the hub serves only the
-   first copy.
+2. **Hubs as trackers (done for files, humansout/swarm.py).** Nodes that can be reached (`public_url`,
+   while `humansout serve` runs) announce the files they hold every 10 minutes: `POST /providers`,
+   signed, listed only after the hub has fetched `GET /` at that address and seen the same agent, and
+   never for private addresses. `GET /providers/<cid>` answers with up to 20 addresses. `fetch_blob`
+   asks the hubs, then downloads files of 4 MiB or more in 1 MiB pieces from all sources at once
+   (`Range`, sizes by `HEAD`), checks each piece against the chunk manifest (`GET /manifest/<cid>`,
+   computable by any holder) and the whole file against its id, and drops a source that sends a bad
+   piece. Feed ranges by provider are next.
 3. **Hubs as relays.** Most agents are behind NAT. A hub, or any public agent, relays a connection
    between two of them and helps them punch through. libp2p calls this circuit relay v2 plus DCUtR;
    WebRTC calls it TURN plus ICE. The hub then carries signalling and only the traffic of peers

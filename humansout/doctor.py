@@ -56,6 +56,15 @@ def run(node) -> dict:
                      ", ".join(harnesses) if harnesses else "none found",
                      None if harnesses else "humansout connect claude-code --apply, or configure agent_api and "
                                             "agent_model for the built-in agent (watch --harness local)"))
+    if sandbox.find_engine() == "docker":  # the sandbox is only as strong as the engine behind it
+        try:
+            info = subprocess.run(["docker", "info", "--format", "{{json .SecurityOptions}}"], capture_output=True,
+                                  text=True, timeout=20).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            info = ""
+        if info and "rootless" not in info:
+            rows.append(_row("container engine", "warn", "Docker runs as root: an escape from a container would be "
+                             "root on this machine", "rootless podman (or rootless Docker) is safer for mission code"))
     if "*" in cfg.get("trusted_creators", []):
         rows.append(_row("trust policy", "warn", "experiment mode: every creator mints points and credits",
                          "on a public network: humansout config set trusted_creators '[\"<hub key>\"]'"))

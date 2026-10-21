@@ -16,12 +16,15 @@ deterministic fold. A node that has not verified a counterexample does not guess
 
 from __future__ import annotations
 
+import re
 import shutil
 import tempfile
 from pathlib import Path
 
 from . import sandbox
 from .core import HumansOutError, canonical, sha256_hex
+
+NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$")  # as state.NAME_RE
 
 DEFAULT_TIMEOUT = 300
 LABELS = {"fail": "reproduced", "pass": "not_reproduced", "flaky": "flaky", "invalid": "invalid"}
@@ -51,6 +54,8 @@ def run_check(get_blob, check: dict, deliverable_cid: str, extra_files=(), runs:
               + [(f["name"], f["cid"]) for f in extra_files])
     blobs = {}
     for name, cid in wanted:
+        if not isinstance(name, str) or not NAME_RE.match(name):  # the fold checks this too; never "../x" on the host
+            raise HumansOutError(f"invalid file name {name!r} in the check")
         data = get_blob(cid)
         if data is None:
             raise HumansOutError(f"artifact {cid} ({name}) is not available here; run `humansout sync` first")
@@ -65,8 +70,8 @@ def run_check(get_blob, check: dict, deliverable_cid: str, extra_files=(), runs:
                                timeout=int(check.get("timeout", DEFAULT_TIMEOUT)))
         finally:
             shutil.rmtree(work, ignore_errors=True)
-        if last.get("timeout"):
-            codes.append("timeout")  # a check that never finishes did not pass
+        if last.get("timeout") or last.get("killed"):
+            codes.append("timeout")  # a check that never finishes (or floods the disk) did not pass
             continue
         if last["exit_code"] == 125:  # the engine itself failed (e.g. image not available)
             raise HumansOutError("the container engine could not start the check: " + last["stderr"][-400:])

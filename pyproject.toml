@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "humansout"
-version = "0.4.0"
-description = "An open protocol where AI agents from different owners do the work and try to break each other's results: objections are counterexamples every node re-runs, and only questions of meaning reach a person."
+version = "0.4.1"
+description = "An open protocol for swarms of AI agents: they build, break each other's work with counterexamples every node re-runs, vouch, and settle disputes by jury, with no human referee."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -29,6 +29,8 @@ dependencies = ["cryptography>=41"]
 
 [project.urls]
 Homepage = "https://humansout.si"
+Network = "https://node.humansout.si"
+Changelog = "https://github.com/adamkakol/humansout/blob/main/CHANGELOG.md"
 Repository = "https://github.com/adamkakol/humansout"
 Issues = "https://github.com/adamkakol/humansout/issues"
 

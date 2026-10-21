@@ -61,7 +61,10 @@ CHECK_KEYS = {"image", "command", "deliverable", "files", "timeout", "require_wi
 MAX_FILES = 20
 # the swarm economy (protocol 0.4): what a mission may set, its bounds and the default when it does not
 SWARM_RULES = {"vouch_slots": (0, 20, 3), "jury_size": (0, 15, 3), "audit_window": (0, 365 * DAY_S, 30 * DAY_S),
-               "max_builders": (1, 50, 2)}
+               "max_builders": (1, 50, 2), "exclusive_items": (0, 1, 1)}
+# exclusive_items 0 (the default for missions created from 0.4.1 on): a work-item lease only tells others who works
+# on what, since when; anyone may work on any item and the first claim accepted for it earns. 1 (missions before):
+# a live lease refuses others' leases and claims, which one agent holding many leases could use to stall a mission.
 INTENT_LEASE_S = (60, 4 * 3600, 1800)  # min, max, default seconds of a "building this" intent
 
 
@@ -140,6 +143,9 @@ class World:
         self.credits: dict[str, int] = {}       # global, spendable on bounties (reputation stays per domain)
         self.credits_locked: dict[str, int] = {}
         self.credit_log: list[dict] = []        # every credit movement, for records and audits
+        self.box_keys: dict[str, str] = {}      # agent -> X25519 public key for private messages (hex)
+        self.messages: list[dict] = []          # private messages: who wrote to whom, when; contents stay sealed
+        self._sent: dict[str, list] = {}        # sender -> [(ts, recipient)] in the last 24 h, for the limits
         # Settling is re-checked only when it can change: after an event that touches items, or once the
         # clock reaches the next deadline (a window closing, a dispute window ending, a bounty expiring).
         self._dirty = True
@@ -277,6 +283,9 @@ class World:
             "ruling": self._ruling,
             "vouch": self._vouch,
             "vote": self._vote,
+            "keys": self._keys,
+            "message": self._message,
+            "witness": self._witness,
         }.get(e["type"])
         if handler is None:
             return self._reject(e, "unknown event type")
@@ -401,6 +410,7 @@ class World:
         wid = e["id"][:12]
         mission["work"][wid] = {"id": wid, "title": title[:300], "description": str(e["body"].get("description", ""))[:5000],
                                 "created_by": e["author"], "claimed_by": None, "lease_until": 0, "done_claim": None,
+                                "workers": {},
                                 "ts": e["ts"], "cancelled": None}
 
     def _work_item(self, e, mission):
@@ -432,6 +442,8 @@ class World:
         mission = self._participant(e)
         if mission is not None and e["body"].get("work_id") == "mission":
             return self._intent(e, mission)
+        if mission is not None and e["body"].get("work_id") in self.items:
+            return self._review_lease(e, mission, self.items[e["body"]["work_id"]])
         work = self._work_item(e, mission) if mission else None
         if work is None:
             return
@@ -439,11 +451,33 @@ class World:
             return self._reject(e, "work item is already done")
         if work["cancelled"]:
             return self._reject(e, "work item was cancelled")
-        if work["claimed_by"] not in (None, e["author"]) and work["lease_until"] > e["ts"]:
+        exclusive = swarm_rule(mission, "exclusive_items")
+        if exclusive and work["claimed_by"] not in (None, e["author"]) and work["lease_until"] > e["ts"]:
             return self._reject(e, "work item is claimed by another agent")
         lease = e["body"].get("lease_seconds", 3600)
         lease = min(max(int(lease) if isinstance(lease, int) else 3600, 60), 7 * DAY_S)
-        work["claimed_by"], work["lease_until"] = e["author"], e["ts"] + lease * 1000
+        mine = work.setdefault("workers", {}).get(e["author"])
+        work["workers"][e["author"]] = {"since": mine["since"] if mine and mine["until"] > e["ts"] else e["ts"],
+                                        "until": e["ts"] + lease * 1000}
+        if exclusive:
+            work["claimed_by"], work["lease_until"] = e["author"], e["ts"] + lease * 1000
+
+    def _review_lease(self, e, mission, item):
+        """`work.claim` with a claim's id: "I am reviewing this now", for a while. It only informs: other agents
+        see who reviews what and since when, and choose; nobody's review is ever refused because of it."""
+        if item["mission"] != mission["id"]:
+            return self._reject(e, "that claim is in another mission")
+        if item["settled"] or e["ts"] > item["close_ts"]:
+            return self._reject(e, "the claim's window is closed")
+        if item["author"] == e["author"]:
+            return self._reject(e, "you cannot review your own claim")
+        lease = e["body"].get("lease_seconds", INTENT_LEASE_S[2])
+        lease = lease if isinstance(lease, int) and not isinstance(lease, bool) else INTENT_LEASE_S[2]
+        lease = min(max(lease, INTENT_LEASE_S[0]), INTENT_LEASE_S[1])
+        reviewers = item.setdefault("reviewers", {})
+        mine = reviewers.get(e["author"])
+        reviewers[e["author"]] = {"since": mine["since"] if mine and mine["until"] > e["ts"] else e["ts"],
+                                  "until": e["ts"] + lease * 1000}
 
     def _work_release(self, e):
         mission = self._participant(e)
@@ -451,11 +485,20 @@ class World:
             if mission["builders"].pop(e["author"], None) is None:
                 return self._reject(e, "you have no intent to release")
             return
+        if mission is not None and e["body"].get("work_id") in self.items:
+            if self.items[e["body"]["work_id"]].setdefault("reviewers", {}).pop(e["author"], None) is None:
+                return self._reject(e, "you are not reviewing it")
+            return
         work = self._work_item(e, mission) if mission else None
         if work is None:
             return
+        if not swarm_rule(mission, "exclusive_items"):
+            if work.setdefault("workers", {}).pop(e["author"], None) is None:
+                return self._reject(e, "you are not working on it")
+            return
         if work["claimed_by"] != e["author"]:
             return self._reject(e, "only the claimant can release")
+        work["workers"].pop(e["author"], None)
         work["claimed_by"], work["lease_until"] = None, 0
 
     def _work_cancel(self, e):
@@ -502,7 +545,8 @@ class World:
                 return self._reject(e, "work item is already done")
             if work["cancelled"]:
                 return self._reject(e, "work item was cancelled")
-            if work["claimed_by"] not in (None, e["author"]) and work["lease_until"] > e["ts"]:
+            if (swarm_rule(mission, "exclusive_items") and work["claimed_by"] not in (None, e["author"])
+                    and work["lease_until"] > e["ts"]):
                 return self._reject(e, "work item is claimed by another agent")
         for iid in mission["claims"]:
             other = self.items[iid]
@@ -627,13 +671,17 @@ class World:
 
     def _seat_jury(self, item, e) -> list[str]:
         """Jurors for a disputed counterexample, from the log alone: everyone who took part in the mission before
-        the dispute, except the parties, agents of the same owner as a party, and the creator (who may rule
-        anyway). Agents with earned reputation in the domain sit first; a hash of the dispute orders the rest."""
+        the dispute and everyone with earned reputation in its domain, except the parties, agents of the same owner
+        as a party, and the creator (who may rule anyway). Agents with earned reputation sit first, so keys made to
+        join one mission cannot outvote agents who did real work in the field; a hash of the dispute orders each
+        group, so the same few agents do not judge everything."""
         mission = self.missions[item["mission"]]
         claim = self.items[item["target"]]
         parties = {claim["author"], item["author"], e["author"], mission["creator"]}
         owners = {mission["participants"].get(p, {}).get("owner") for p in parties} - {None}
         pool = {a for a, info in mission["participants"].items() if info["ts"] < e["ts"]}
+        pool.update(a for (a, dom), s in self.stats.items()
+                    if dom == mission["domain"] and (s["built"] or s["found"] or s["vouched"] or s["judged"]))
         for iid in mission["claims"]:
             c = self.items[iid]
             pool.add(c["author"])
@@ -646,6 +694,45 @@ class World:
             return bool(s and (s["built"] or s["found"] or s["vouched"] or s["judged"]))
         ranked = sorted(pool, key=lambda a: (not earned(a), sha256_hex((e["id"] + a).encode())))
         return ranked[:swarm_rule(mission, "jury_size")]
+
+    def _witness(self, e):
+        """A time witness's checkpoint (witness.py): it changes no state, only when other events count."""
+        from .witness import heads_ok
+        if e["author"] not in set(self.config.get("time_witnesses") or []):
+            return self._reject(e, "not a time witness on this node (config time_witnesses)")
+        if not heads_ok(e["body"]):
+            return self._reject(e, "a witness event lists feeds and their lengths (heads)")
+
+    def _keys(self, e):
+        """An agent publishes the public half of its messaging key (X25519, hex)."""
+        key = e["body"].get("x25519")
+        if not (isinstance(key, str) and re.fullmatch(r"[0-9a-f]{64}", key)):
+            return self._reject(e, "keys needs x25519: 64 hex characters")
+        self.box_keys[e["author"]] = key
+
+    def _message(self, e):
+        """A private message: sealed for its recipient (box) and for its sender (self). Nodes carry it; only the
+        two of them can read it. The fold keeps who wrote to whom and when, never the contents."""
+        from .messages import MAX_TTL_DAYS, PER_DAY, PER_RECIPIENT_PER_DAY
+        body = e["body"]
+        to = body.get("to")
+        if not (isinstance(to, str) and PUB_RE.match(to)) or to == e["author"]:
+            return self._reject(e, "a message needs a recipient: another agent's id")
+        if to not in self.box_keys:
+            return self._reject(e, "the recipient has not published a messaging key")
+        if not all(isinstance(body.get(k), str) and CID_RE.match(body[k]) for k in ("box", "self")) or body["box"] == body["self"]:
+            return self._reject(e, "a message names two sealed payloads: one for its recipient, one for its sender")
+        expires = body.get("expires")
+        if not (isinstance(expires, int) and not isinstance(expires, bool) and e["ts"] < expires <= e["ts"] + MAX_TTL_DAYS * DAY_S * 1000):
+            return self._reject(e, f"a message expires after it is sent and within {MAX_TTL_DAYS} days")
+        recent = [m for m in self._sent.get(e["author"], []) if e["ts"] - m[0] < DAY_S * 1000]
+        if len(recent) >= PER_DAY or sum(1 for _, r in recent if r == to) >= PER_RECIPIENT_PER_DAY:
+            return self._reject(e, f"too many messages: at most {PER_DAY} a day, {PER_RECIPIENT_PER_DAY} to one agent")
+        self._sent[e["author"]] = recent + [(e["ts"], to)]
+        mid = body.get("mission_id")
+        self.messages.append({"id": e["id"], "from": e["author"], "to": to, "ts": e["ts"], "expires": expires,
+                              "mission": mid if isinstance(mid, str) and mid in self.missions else None,
+                              "box": body["box"], "self": body["self"]})
 
     def _vouch(self, e):
         """"I tried to break this claim and could not": a staked review. Vouchers of accepted work earn; vouchers
@@ -1072,9 +1159,12 @@ class World:
                 status = "claimed"
             else:
                 status = "open"
+            workers = [{"agent": a, "since_ms": v["since"], "until_ms": v["until"]}
+                       for a, v in sorted((w.get("workers") or {}).items(), key=lambda kv: kv[1]["since"])
+                       if v["until"] > now]
             work.append({"id": w["id"], "title": w["title"], "description": w["description"], "status": status,
                          "claimed_by": w["claimed_by"] if status in ("claimed", "in_review") else None,
-                         "lease_until_ms": w["lease_until"] if status == "claimed" else None})
+                         "lease_until_ms": w["lease_until"] if status == "claimed" else None, "workers": workers})
         return {
             "mission_id": mid, "status": m["status"], "manifest": m["manifest"], "creator": m["creator"],
             "domain": m["domain"], "challenge_window_s": m["window_ms"] // 1000,
@@ -1222,9 +1312,16 @@ MAX_CLOCK_SKEW_MS = 5 * 60 * 1000
 
 def build_world(events: list[dict], config: dict, now: int, verifications: dict | None = None) -> World:
     world = World(config, verifications)
-    for e in sorted(events, key=lambda x: (x["ts"], x["author"], x["seq"])):
-        if e["ts"] > now + MAX_CLOCK_SKEW_MS:
-            continue  # too far in the future; applied once time catches up
+    events = [e for e in events if e["ts"] <= now + MAX_CLOCK_SKEW_MS]  # too far ahead: applied once time catches up
+    witnesses = set(config.get("time_witnesses") or [])
+    if witnesses:  # an event counts from when a witness first saw it, not from what its author wrote (witness.py)
+        from .witness import effective_times
+        times = effective_times(events, witnesses)
+        if times:
+            events = [e if times[e["id"]] == e["ts"] else dict(e, ts=times[e["id"]], claimed_ts=e["ts"]) for e in events]
+    # events a witness saw in the same interval can share a time: then the earlier one their authors wrote goes
+    # first (bounded by the interval), never the smaller author id, which anyone could pick by making keys
+    for e in sorted(events, key=lambda x: (x["ts"], x.get("claimed_ts", x["ts"]), x["author"], x["seq"])):
         world.settle(e["ts"])
         world.apply(e)
     world.settle(now)
