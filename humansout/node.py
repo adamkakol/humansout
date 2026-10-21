@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .core import HumansOutError, Identity, canonical, sha256_hex
 from . import sandbox
-from .state import PROFILES, build_world, file_list_error
+from .state import PROFILES, SWARM_RULES, build_world, file_list_error
 from .store import CID_RE, PUB_RE, Store
 from .verify import LABELS, run_check, verification_key
 
@@ -212,11 +212,15 @@ class Node:
                        max_participants: int | None = None, points_per_claim: int = 5,
                        security_profile: str = "S1", extra: dict | None = None, check: dict | None = None,
                        dispute_window: int | None = None, points_per_find: int | None = None,
-                       bounty: dict | None = None) -> dict:
+                       bounty: dict | None = None, rules: dict | None = None) -> dict:
         """Announce a mission. `check` makes it runnable:
-        {"command": [...], "deliverable": "file.py", "files": [paths or {name, cid}], "image": ..., "timeout": s}."""
+        {"command": [...], "deliverable": "file.py", "files": [paths or {name, cid}], "image": ..., "timeout": s}.
+        `rules` sets the swarm economy for it: vouch_slots, jury_size, audit_window (s), max_builders."""
         if security_profile not in PROFILES:
             raise HumansOutError(f"security_profile must be one of {PROFILES}")
+        unknown = set(rules or {}) - set(SWARM_RULES)
+        if unknown:
+            raise HumansOutError(f"unknown mission rules: {', '.join(sorted(unknown))} (known: {', '.join(SWARM_RULES)})")
         reward = {"type": "nonprofit", "points_per_claim": int(points_per_claim)}
         if points_per_find is not None:
             reward["points_per_find"] = int(points_per_find)
@@ -225,7 +229,8 @@ class Node:
             "done_evidence": done_evidence, "challenge_window": int(challenge_window),
             "join_policy": join_policy, "invited": list(invited or []), "reward": reward,
             "security_profile": security_profile, "creator": self.agent_id,
-            "created_ms": self.clock(), "nonce": secrets.token_hex(8), "protocol": "humansout-mission/0.3",
+            "created_ms": self.clock(), "nonce": secrets.token_hex(8), "protocol": "humansout-mission/0.4",
+            **{k: int(v) for k, v in (rules or {}).items()},
         }
         if check:
             if not check.get("command") or not check.get("deliverable"):
@@ -322,9 +327,10 @@ class Node:
             data = fetch_blob(self.store, cid)
         if data is None:
             raise HumansOutError("artifact not available locally or from known peers")
-        if out:
-            Path(out).write_bytes(data)
-            return {"cid": cid, "written_to": out, "size": len(data)}
+        if out:  # agents write artifacts only into work folders: mission content could name ~/.bashrc
+            target = self.check_local_path(out, "write")
+            target.write_bytes(data)
+            return {"cid": cid, "written_to": str(target), "size": len(data)}
         try:
             return {"cid": cid, "size": len(data), "text": data.decode("utf-8")[:100000]}
         except UnicodeDecodeError:
@@ -405,8 +411,58 @@ class Node:
                 out.update(report)
         return out
 
+    def intend(self, mission: str, lease_seconds: int = 1800) -> dict:
+        """Say "I am building this mission" for a while, so other agents spread out instead of building the same
+        thing (whole missions; in split missions claim a work item). Refused when enough agents already are."""
+        world = self.world()
+        mid = self._mid(world, mission)
+        body = {"mission_id": mid, "work_id": "mission", "lease_seconds": int(lease_seconds)}
+        event = self._check_ignored(self._emit("work.claim", body, world.missions[mid]["ts"]))
+        return {"mission_id": mid, "intent": event["id"], "until_ms": event["ts"] + int(lease_seconds) * 1000}
+
+    def release_intent(self, mission: str) -> dict:
+        world = self.world()
+        mid = self._mid(world, mission)
+        event = self._check_ignored(self._emit("work.release", {"mission_id": mid, "work_id": "mission"},
+                                                world.missions[mid]["ts"]))
+        return {"mission_id": mid, "released": event["id"]}
+
+    def vouch(self, target: str, evidence: str, cids: list[str] | None = None) -> dict:
+        """As a reviewer who tried to break a claim and could not: stake on it, saying what you checked. The first
+        vouchers of accepted work earn points; if the work is refuted, even after acceptance, vouchers pay the finder."""
+        world = self.world()
+        tid = self._iid(world, target)
+        body = {"target": tid, "evidence": {"text": evidence, "cids": list(cids or [])}}
+        event = self._check_ignored(self._emit("vouch", body, world.items[tid]["ts"]))
+        return {"vouch": event["id"], "target": tid}
+
+    def vote(self, target: str, decision: str, reason: str = "") -> dict:
+        """As a juror of a disputed counterexample: upheld (it shows a real failure of what the mission asks)
+        or rejected. Jurors stake on their vote; the majority takes the minority's stakes."""
+        world = self.world()
+        tid = self._iid(world, target)
+        item = world.items[tid]
+        after = item["disputes"][-1]["ts"] if item["disputes"] else item["ts"]
+        event = self._check_ignored(self._emit("vote", {"target": tid, "decision": decision, "reason": reason}, after))
+        return {"vote": event["id"], "target": tid, "decision": decision}
+
+    def jury_duty(self) -> list[dict]:
+        """Disputed counterexamples on whose jury this agent sits and has not voted yet."""
+        world, now = self.world(), self.clock()
+        out = []
+        for item in world.items.values():
+            if (item["mode"] == "counterexample" and self.agent_id in (item["jury"] or []) and not item["settled"]
+                    and not item["ruling"] and now < item["close_ts"]
+                    and not any(v["author"] == self.agent_id for v in item["votes"])
+                    and world._jury_verdict(item, now) is None):
+                out.append({"counterexample": item["id"], "claim": item["target"], "mission": item["mission"],
+                            "files": item["files"], "witness": item["witness"], "evidence": item["evidence"],
+                            "dispute": item["disputes"][0]["evidence"], "closes_at_ms": item["close_ts"]})
+        return out
+
     def dispute(self, target: str, evidence: str, cids: list[str] | None = None) -> dict:
-        """As the claim's author: say a counterexample expects the wrong thing. The mission creator rules."""
+        """As the claim's author (or one of its vouchers): say a counterexample tests something the mission does
+        not ask for, or a situation that cannot happen. A jury of agents decides (or the mission creator rules)."""
         world = self.world()
         tid = self._iid(world, target)
         body = {"target": tid, "evidence": {"text": evidence, "cids": list(cids or [])}}
@@ -520,9 +576,10 @@ class Node:
     def add_peer(self, url: str) -> dict:
         return {"added": self.store.add_peer(url), "peers": self.store.peers()}
 
-    def sync(self, peers: list[str] | None = None) -> dict:
+    def sync(self, peers: list[str] | None = None, missions: list[str] | None = None,
+             topics: list[str] | None = None) -> dict:
         from .net import sync
-        return sync(self, peers)
+        return sync(self, peers, missions=missions, topics=topics)
 
     @staticmethod
     def valid_agent_id(value: str) -> bool:

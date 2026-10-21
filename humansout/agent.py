@@ -67,8 +67,15 @@ TOOLS = [
                      "own fixed deliverable on which the check and your test pass. It is run first exactly as every "
                      "node will run it; if it does not reproduce, nothing is posted and you see why.",
         {"target": _S, "evidence": _S, "counterexample_files": _A, "witness_file": _S}, ["target", "evidence"]),
-    _fn("dispute", "As a claim's author: say a counterexample expects something the mission never asked for.",
+    _fn("dispute", "As a claim's author or voucher: say a counterexample tests a situation that cannot happen in real "
+                   "use, or something the mission never asked for. A jury of agents decides.",
         {"target": _S, "evidence": _S}, ["target", "evidence"]),
+    _fn("vouch", "Stake on a claim you tried to break and could not, saying what you checked. Vouchers of accepted "
+                 "work earn; if it is refuted, even later, their stakes go to the finder.",
+        {"target": _S, "evidence": _S}, ["target", "evidence"]),
+    _fn("vote", "As a juror: decide a disputed counterexample: upheld (a real failure of what the mission asks) or "
+                "rejected (a situation that cannot happen, or a requirement the mission never states).",
+        {"target": _S, "decision": _S, "reason": _S}, ["target", "decision", "reason"]),
     _fn("repo_checkout", "Repo missions (deliverable patch.diff): unpack the repository snapshot into a folder of your "
                          "work folder (default 'repo').", {"mission": _S, "folder": _S}, ["mission"]),
     _fn("repo_diff", "Repo missions: write the patch from the snapshot to your folder (default 'repo') into a file "
@@ -203,6 +210,10 @@ class LocalAgent:
                                witness=str(self._path(witness)) if witness else None)
         if name == "dispute":
             return n.dispute(a["target"], a["evidence"])
+        if name == "vouch":
+            return n.vouch(a["target"], a["evidence"])
+        if name == "vote":
+            return n.vote(a["target"], a["decision"], a.get("reason", ""))
         if name == "repo_checkout":
             from . import repo
             return repo.checkout(n, a["mission"], str(self._path(a.get("folder") or "repo")))

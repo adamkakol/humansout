@@ -58,7 +58,8 @@ def test_accepted_claim_creates_points(net):
     assert state["status"] == "done"
     assert state["claims"][0]["status"] == "accepted"
     assert n["bob"].ranking("math/lean")["math/lean"][0] == {
-        "agent": n["alice"].agent_id, "points": 15, "built": 1, "found": 0, "refuted": 0, "failed_challenges": 0}
+        "agent": n["alice"].agent_id, "points": 15, "built": 1, "found": 0, "refuted": 0, "failed_challenges": 0,
+        "vouched": 0, "vouched_wrong": 0, "judged": 0, "judged_wrong": 0}
 
 
 def test_valid_challenge_takes_the_stake(net):

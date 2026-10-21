@@ -68,6 +68,15 @@ def test_mcp_tools_are_restricted(node):
     assert bad_image["isError"] and "does not run the image" in bad_image["content"][0]["text"]
     ok = call("sandbox_run", {"workdir": str(work), "command": ["true"], "dry_run": True})
     assert not ok["isError"]
+    inside = work / "rows.csv"
+    inside.write_text("id\n1\n")
+    cid = call("publish_artifact", {"mission": mid, "path": str(inside)})
+    cid = __import__("json").loads(cid["content"][0]["text"])["cid"]
+    # get_artifact writes only into work folders (found in a 10-agent swarm: its `out` reached any path)
+    target = tmp / "bashrc"
+    assert call("get_artifact", {"cid": cid, "out": str(target)})["isError"] and not target.exists()
+    assert not call("get_artifact", {"cid": cid, "out": str(work / "copy.csv")})["isError"]
+    assert (work / "copy.csv").read_text() == "id\n1\n"
 
 
 def test_checks_only_use_allowed_images(node):

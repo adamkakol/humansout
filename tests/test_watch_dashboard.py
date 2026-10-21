@@ -77,7 +77,8 @@ def test_find_work_orders_and_filters(tmp_path):
     claim = alice.claim_done(mid, "v1", cids=[cid])["claim"]
     share(creator, alice, bob)
     bob_events = watch.find_work(bob.world(), bob.agent_id, clock(), cfg, watch.load_state(bob.home))
-    assert [(e.kind, e.item or e.mission) for e in bob_events] == [("review", claim), ("build", mid)]
+    # one result per target: bob reviews alice's claim instead of building the same mission while it may win
+    assert [(e.kind, e.item or e.mission) for e in bob_events] == [("review", claim)]
     assert watch.find_work(alice.world(), alice.agent_id, clock(), cfg, watch.load_state(alice.home)) == []
 
     clock.advance(1)
@@ -85,6 +86,33 @@ def test_find_work_orders_and_filters(tmp_path):
     share(creator, alice, bob)
     alice_events = watch.find_work(alice.world(), alice.agent_id, clock(), cfg, watch.load_state(alice.home))
     assert [(e.kind, e.detail["objections"]) for e in alice_events] == [("respond", [ch["challenge"]])]
+
+
+def test_the_creator_is_woken_only_where_no_jury_can_sit(tmp_path):
+    clock = Clock()
+    creator, alice, bob = (Node(tmp_path / n, clock=clock) for n in ("creator", "alice", "bob"))
+    mid = runnable_mission(creator, tmp_path)
+    share(creator, alice, bob)  # only the two parties take part: no juror is left
+    alice.join(mid)
+    code = tmp_path / "slugify.py"
+    code.write_text("def slugify(s):\n    return s\n")
+    claim = alice.claim_done(mid, "v1", cids=[alice.publish_artifact(mid, str(code))["cid"]])["claim"]
+    share(creator, alice, bob)
+    clock.advance(1)
+    edge = tmp_path / "bob" / "test_edge.py"
+    edge.parent.mkdir(parents=True, exist_ok=True)
+    edge.write_text("import unittest\n")
+    ce = bob.challenge(claim, "fails", counterexample=[str(edge)], preflight=False)["challenge"]
+    share(creator, alice, bob)
+    for node in (creator, alice, bob):
+        node.store.save_verification(node.world().items[ce]["vkey"], {"result": "fail"})
+    clock.advance(1)
+    alice.dispute(ce, "it expects something the mission never asks")
+    share(creator, alice, bob)
+    assert creator.world().items[ce]["jury"] == []
+    events = watch.find_work(creator.world(), creator.agent_id, clock(), watch.WatchConfig(roles=()),
+                             watch.load_state(creator.home))
+    assert [(e.kind, e.item) for e in events] == [("ruling", ce)]
 
 
 def test_budget_and_dry_run(tmp_path):
@@ -170,7 +198,9 @@ def test_watch_drives_a_mission_end_to_end(tmp_path):
             cli=[sys.executable, "-m", "humansout"])
 
     def run(who, roles):
-        return watch.cycle(nodes[who], cfg(who, roles))
+        report = watch.cycle(nodes[who], cfg(who, roles))
+        time.sleep(1.05)  # serving nodes pick up other processes' writes within a second (store.refresh_index)
+        return report
 
     try:
         mid = runnable_mission(nodes["creator"], tmp_path / "files", window=60, dispute=6)
@@ -188,12 +218,10 @@ def test_watch_drives_a_mission_end_to_end(tmp_path):
         assert [v["counterexample"] for v in builder["verified"] if "counterexample" in v] == ["reproduced"]  # bob's v2 objection was stopped by preflight
         assert [t["kind"] for t in builder["turns"]] == ["respond"]  # it disputes the unicode test
         creator = run("creator", ())
-        assert len(creator["notifications"]) == 1 and "needs your ruling" in notes.read_text()
-        assert json.loads(get(urls["creator"] + "/api/overview")[2])["missions"][0]["needs_ruling"] == 1
-        disputed = creator["notifications"][0]["message"].split("humansout rule ")[1].split()[0]
-        subprocess.run([sys.executable, "-m", "humansout", "--home", str(nodes["creator"].home), "rule", disputed,
-                        "--decision", "rejected", "--reason", "ASCII slugs were asked for"], check=True, capture_output=True)
-        assert run("creator", ())["notifications"] == []  # notified once only
+        assert creator["notifications"] == [] and not notes.exists()  # a jury of agents decides: no human is woken
+        assert json.loads(get(urls["creator"] + "/api/overview")[2])["missions"][0]["with_jury"] == 1
+        juror = run("breaker", ("break",))  # the only agent outside the dispute sits on its jury
+        assert [t["kind"] for t in juror["turns"]] == ["jury"]
         for _ in range(40):  # wait for v2's challenge window to close
             for n in names:
                 run(n, ())
@@ -204,9 +232,10 @@ def test_watch_drives_a_mission_end_to_end(tmp_path):
         assert len({json.dumps(v, sort_keys=True) for v in views.values()}) == 1
         statuses = [c["status"] for c in views["creator"]]
         assert statuses == ["refuted", "accepted"]
+        unicode_test = next(ch for ch in views["creator"][1]["challenges"] if ch["files"][0]["name"] == "test_unicode.py")
+        assert unicode_test["status"] == "rejected" and unicode_test["reason"] == "rejected by the jury"
         overview = json.loads(get(urls["creator"] + "/api/overview")[2])
         assert overview["missions"][0]["status"] == "done" and overview["missions"][0]["needs_ruling"] == 0
-        assert overview["watch"]["notifications"]
     finally:
         for srv in servers.values():
             srv.shutdown()
@@ -218,7 +247,9 @@ def test_model_flags_and_a_per_node_mcp_config(tmp_path):
     assert watch.parse_harness("codex", "humansout", "gpt-mini")[:4] == ["codex", "exec", "-m", "{model}"]
     assert "--model" not in watch.parse_harness("claude", "humansout")
     tools = claude[claude.index("--allowedTools") + 1].split(",")
-    assert tools == ["mcp__humansout", "Read(./**)", "Write(./**)", "Edit(./**)"]  # never a bare Write: it reaches anywhere
+    # never a bare Write (it reaches anywhere), never "./**" (it follows the agent's cd): the work folder, absolute
+    assert tools == ["mcp__humansout", "Read(/{workdir}/**)", "Write(/{workdir}/**)", "Edit(/{workdir}/**)"]
+    assert tools[2].format(workdir="/home/me/work/abc") == "Write(//home/me/work/abc/**)"
     clock = Clock()
     creator, me = Node(tmp_path / "c", clock=clock), Node(tmp_path / "me", clock=clock)
     runnable_mission(creator, tmp_path)

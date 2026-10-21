@@ -36,7 +36,12 @@ def main():
     claim = re.search(r"Claim ([0-9a-f]{64})|claim ([0-9a-f]{64})", prompt)
     claim = next(g for g in claim.groups() if g) if claim else None
     work = Path.cwd()
-    if "has no accepted result" in prompt and who == "builder":
+    if "You sit on the jury" in prompt:
+        ce = re.search(r"counterexample ([0-9a-f]{64})", prompt).group(1)
+        ascii_asked = "ASCII" in prompt  # the dispute says the mission asks for ASCII slugs
+        ho("vote", ce, "--decision", "rejected" if ascii_asked else "upheld",
+           "--reason", "the mission asks for lower-case ASCII words" if ascii_asked else "a real failure")
+    elif "has no accepted result" in prompt and who == "builder":
         assert "join it first" in prompt
         ho("join", mission)
         (work / "slugify.py").write_text(V1)

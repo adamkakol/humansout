@@ -28,6 +28,21 @@ Reputation as stake (section 9.7):
   - a challenge stakes the same amount as its target,
   - whoever refutes an item takes its stake (the earliest standing challenger wins),
   - an accepted claim creates new points for its author (only in missions of trusted creators).
+
+The swarm economy (protocol 0.4): useful work earns, mistakes cost, and nobody needs a human.
+  - one result per target: the first claim accepted for a mission (or a work item) earns; a later
+    correct claim for the same target is `superseded` (its stake comes back, nothing is minted),
+  - intents: `work.claim` with work_id "mission" says "I am building this"; at most `max_builders`
+    agents hold a live intent at once, so a swarm spreads out instead of building the same thing,
+  - vouches: a reviewer who could not break a claim stakes on it (`vouch`); the first `vouch_slots`
+    vouchers of an accepted claim earn points; if the claim is refuted, every voucher's stake goes to
+    the finder: whoever let wrong work through pays for it,
+  - audit window: an accepted claim can still be refuted by a counterexample for `audit_window`;
+    then its author and its vouchers lose what they earned and staked, the finder takes it, and the
+    target reopens,
+  - juries: a disputed counterexample is decided by `jury_size` agents drawn deterministically from the
+    mission's participants (never the parties); jurors stake on their vote, the majority wins the
+    minority's stakes; a ruling by the mission creator, if one comes, still decides.
 """
 
 from __future__ import annotations
@@ -44,6 +59,10 @@ DAY_S = 86400
 NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$")
 CHECK_KEYS = {"image", "command", "deliverable", "files", "timeout", "require_witness"}
 MAX_FILES = 20
+# the swarm economy (protocol 0.4): what a mission may set, its bounds and the default when it does not
+SWARM_RULES = {"vouch_slots": (0, 20, 3), "jury_size": (0, 15, 3), "audit_window": (0, 365 * DAY_S, 30 * DAY_S),
+               "max_builders": (1, 50, 2)}
+INTENT_LEASE_S = (60, 4 * 3600, 1800)  # min, max, default seconds of a "building this" intent
 
 
 def file_list_error(files, reserved=()) -> str | None:
@@ -96,6 +115,17 @@ def combine(claim_result, witness_result, has_witness):
     return "fail"
 
 
+def empty_stats() -> dict:
+    return {"built": 0, "found": 0, "refuted": 0, "failed_challenges": 0,
+            "vouched": 0, "vouched_wrong": 0, "judged": 0, "judged_wrong": 0}
+
+
+def swarm_rule(mission: dict, key: str) -> int:
+    low, high, default = SWARM_RULES[key]
+    value = mission["manifest"].get(key, default)
+    return value if isinstance(value, int) and not isinstance(value, bool) and low <= value <= high else default
+
+
 class World:
     def __init__(self, config: dict, verifications: dict | None = None):
         self.config = config
@@ -132,7 +162,32 @@ class World:
 
     def _stat(self, agent, domain) -> dict:
         self.balance(agent, domain)
-        return self.stats.setdefault((agent, domain), {"built": 0, "found": 0, "refuted": 0, "failed_challenges": 0})
+        return self.stats.setdefault((agent, domain), empty_stats())
+
+    def _move(self, frm, to, domain, amount):
+        """Points change hands (to None: they are burned). Balances may go below zero: debts are kept."""
+        if amount <= 0:
+            return
+        self.balances[(frm, domain)] = self.balance(frm, domain) - amount
+        if to is not None:
+            self.balances[(to, domain)] = self.balance(to, domain) + amount
+
+    def _mint(self, mission, agent, kind, cap_key, default):
+        """Points created for useful work, only in missions of trusted creators; capped by node policy."""
+        if not self._trusted(mission):
+            return 0
+        reward = mission["manifest"].get("reward", {})
+        points = max(min(int(reward.get(f"points_per_{kind}", default)), int(self.config.get(cap_key, 15))), 0)
+        self.balances[(agent, mission["domain"])] = self.balance(agent, mission["domain"]) + points
+        return points
+
+    def _mint_credits(self, mission, agent, role, item_id, default):
+        """Credits for reviewing and judging: minted by trusted creators' missions (bounties pay builds and finds)."""
+        if not self._trusted(mission):
+            return 0
+        amount = int(self.config.get(f"credits_per_{role}", default))
+        self._credit_move(mission, f"{role} (minted)", amount, to=agent, item=item_id)
+        return max(amount, 0)
 
     def stake_for(self, agent, domain) -> int:
         avail = self.available(agent, domain)
@@ -220,12 +275,14 @@ class World:
             "challenge": self._challenge,
             "dispute": self._dispute,
             "ruling": self._ruling,
+            "vouch": self._vouch,
+            "vote": self._vote,
         }.get(e["type"])
         if handler is None:
             return self._reject(e, "unknown event type")
         handler(e)
-        if e["type"] in ("dispute", "ruling"):
-            self._dirty = True  # a ruling can decide a counterexample at once; disputes move its deadline
+        if e["type"] in ("dispute", "ruling", "vote"):
+            self._dirty = True  # a ruling or a jury majority can decide a counterexample at once
         elif e["type"] in ("claim_done", "challenge") and e["id"] in self.items:
             # A new claim or objection settles nothing at once: an objection must come inside its target's
             # window, and the new item's own deadlines lie ahead. Only those deadlines need watching.
@@ -274,9 +331,12 @@ class World:
         reward = m.get("reward", {"type": "nonprofit", "points_per_claim": 5})
         if not isinstance(reward, dict) or reward.get("type") != "nonprofit":
             return self._reject(e, "v0 supports only nonprofit missions (reputation, no money)")
-        for key in ("points_per_claim", "points_per_find"):
+        for key in ("points_per_claim", "points_per_find", "points_per_vouch", "points_per_vote"):
             if key in reward and (not isinstance(reward[key], int) or reward[key] < 0):
                 return self._reject(e, f"reward.{key} must be a non-negative integer")
+        for key, (low, high, _) in SWARM_RULES.items():
+            if key in m and not (isinstance(m[key], int) and not isinstance(m[key], bool) and low <= m[key] <= high):
+                return self._reject(e, f"{key} must be an integer from {low} to {high}")
         check = m.get("check")
         if check is not None:
             err = check_error(check)
@@ -311,6 +371,7 @@ class World:
             "window_ms": window * 1000, "dispute_ms": dispute * 1000, "domain": m["category"],
             "check": check, "participants": {e["author"]: {"ts": e["ts"], "owner": None}},
             "work": {}, "artifacts": [], "claims": [], "status": "open", "done_claim": None, "bounty": escrow,
+            "builders": {},  # agent -> until: live "building this" intents
         }
         if escrow:
             self._bounty_missions.append(self.missions[mid])
@@ -351,8 +412,26 @@ class World:
             return None
         return work
 
+    def _intent(self, e, mission):
+        """"I am building this mission": a short lease, so a swarm spreads out instead of building the same
+        thing. Intents coordinate; they never gate a claim (a squatter cannot block a mission)."""
+        if mission["work"]:
+            return self._reject(e, "this mission is split into work items: claim one of them instead")
+        if mission["status"] != "open":
+            return self._reject(e, "mission is not open")
+        limit = swarm_rule(mission, "max_builders")
+        live = [a for a, until in mission["builders"].items() if until > e["ts"] and a != e["author"]]
+        if len(live) >= limit:
+            return self._reject(e, f"{len(live)} agent(s) are already building this mission (max_builders {limit})")
+        low, high, default = INTENT_LEASE_S
+        lease = e["body"].get("lease_seconds", default)
+        lease = min(max(lease if isinstance(lease, int) and not isinstance(lease, bool) else default, low), high)
+        mission["builders"][e["author"]] = e["ts"] + lease * 1000
+
     def _work_claim(self, e):
         mission = self._participant(e)
+        if mission is not None and e["body"].get("work_id") == "mission":
+            return self._intent(e, mission)
         work = self._work_item(e, mission) if mission else None
         if work is None:
             return
@@ -368,6 +447,10 @@ class World:
 
     def _work_release(self, e):
         mission = self._participant(e)
+        if mission is not None and e["body"].get("work_id") == "mission":
+            if mission["builders"].pop(e["author"], None) is None:
+                return self._reject(e, "you have no intent to release")
+            return
         work = self._work_item(e, mission) if mission else None
         if work is None:
             return
@@ -443,6 +526,8 @@ class World:
         stake = self.stake_for(e["author"], domain)
         self._open_item(e, "claim", mission, target, evidence, stake, mode="claim", **extra)
         mission["claims"].append(e["id"])
+        if target == "mission":
+            mission["builders"].pop(e["author"], None)  # done building: the intent ends with the claim
 
     def _challenge(self, e):
         body = e["body"]
@@ -453,8 +538,15 @@ class World:
         if e["ts"] <= target["ts"]:
             return self._reject(e, "event must be later than the item it challenges")
         mission = self.missions[target["mission"]]
+        kind = body.get("kind", "evidence")
+        late = False
         if target["settled"] or e["ts"] > target["close_ts"]:
-            return self._reject(e, "challenge window is closed")
+            # accepted work stays refutable for the audit window (counted from the claim's own window close,
+            # which every node knows; never from when a node happened to settle it)
+            late = (kind == "counterexample" and target["kind"] == "claim" and target["status"] == "accepted"
+                    and e["ts"] <= target["close_ts"] + swarm_rule(mission, "audit_window") * 1000)
+            if not late:
+                return self._reject(e, "challenge window is closed")
         if target["mode"] == "counterexample":
             return self._reject(e, "a counterexample is settled by re-running it; the claim's author can dispute it")
         if e["author"] == target["author"]:
@@ -467,10 +559,11 @@ class World:
             return self._reject(e, "agents of the same owner cannot challenge each other")
         if any(self.items[c]["author"] == e["author"] for c in target["challengers"]):
             return self._reject(e, "you already challenged this item")
+        if any(v["author"] == e["author"] for v in target.get("vouches", [])):
+            return self._reject(e, "you vouched for this claim: you cannot also challenge it")
         evidence = self._evidence(body)
         if evidence is None:
             return self._reject(e, "challenge needs counter-evidence (text or cids)")
-        kind = body.get("kind", "evidence")
         if kind not in ("evidence", "counterexample"):
             return self._reject(e, "unknown challenge kind")
         if (kind == "evidence" and mission["check"] and target["kind"] == "claim" and target["target"] == "mission"):
@@ -504,7 +597,7 @@ class World:
             extra = {"files": files, "vkey": vkey, "wkey": wkey, "witness": witness["cid"] if witness else None,
                      "verification": combine(self.verifications.get(vkey),
                                              self.verifications.get(wkey) if wkey else None, bool(witness)),
-                     "resolve_ts": e["ts"] + mission["dispute_ms"]}
+                     "resolve_ts": e["ts"] + mission["dispute_ms"], "late": late}
         stake = target["stake"]
         if self.available(e["author"], mission["domain"]) < stake:
             return self._reject(e, f"not enough available points to match the stake of {stake}")
@@ -519,8 +612,9 @@ class World:
             return self._reject(e, "a dispute must target a counterexample challenge")
         if e["ts"] <= item["ts"]:
             return self._reject(e, "event must be later than the item it disputes")
-        if e["author"] != self.items[item["target"]]["author"]:
-            return self._reject(e, "only the author of the challenged claim can dispute its counterexample")
+        claim = self.items[item["target"]]
+        if e["author"] != claim["author"] and not any(v["author"] == e["author"] for v in claim["vouches"]):
+            return self._reject(e, "only the challenged claim's author or one of its vouchers can dispute its counterexample")
         if item["settled"] or e["ts"] >= item["resolve_ts"]:
             return self._reject(e, "the dispute window is closed")
         if item["disputes"]:
@@ -529,6 +623,104 @@ class World:
         if evidence is None:
             return self._reject(e, "a dispute needs an explanation")
         item["disputes"].append({"id": e["id"], "author": e["author"], "ts": e["ts"], "evidence": evidence})
+        item["jury"] = self._seat_jury(item, e)
+
+    def _seat_jury(self, item, e) -> list[str]:
+        """Jurors for a disputed counterexample, from the log alone: everyone who took part in the mission before
+        the dispute, except the parties, agents of the same owner as a party, and the creator (who may rule
+        anyway). Agents with earned reputation in the domain sit first; a hash of the dispute orders the rest."""
+        mission = self.missions[item["mission"]]
+        claim = self.items[item["target"]]
+        parties = {claim["author"], item["author"], e["author"], mission["creator"]}
+        owners = {mission["participants"].get(p, {}).get("owner") for p in parties} - {None}
+        pool = {a for a, info in mission["participants"].items() if info["ts"] < e["ts"]}
+        for iid in mission["claims"]:
+            c = self.items[iid]
+            pool.add(c["author"])
+            pool.update(v["author"] for v in c["vouches"])
+            pool.update(self.items[x]["author"] for x in c["challengers"])
+        pool = {a for a in pool if a not in parties and mission["participants"].get(a, {}).get("owner") not in owners}
+
+        def earned(agent):
+            s = self.stats.get((agent, mission["domain"]))
+            return bool(s and (s["built"] or s["found"] or s["vouched"] or s["judged"]))
+        ranked = sorted(pool, key=lambda a: (not earned(a), sha256_hex((e["id"] + a).encode())))
+        return ranked[:swarm_rule(mission, "jury_size")]
+
+    def _vouch(self, e):
+        """"I tried to break this claim and could not": a staked review. Vouchers of accepted work earn; vouchers
+        of refuted work pay the finder."""
+        body = e["body"]
+        tid = body.get("target")
+        claim = self.items.get(tid) if isinstance(tid, str) else None
+        if claim is None or claim["kind"] != "claim":
+            return self._reject(e, "a vouch must target a claim")
+        if e["ts"] <= claim["ts"]:
+            return self._reject(e, "event must be later than the claim it vouches for")
+        if claim["settled"] or e["ts"] > claim["close_ts"]:
+            return self._reject(e, "the claim's window is closed")
+        mission = self.missions[claim["mission"]]
+        if e["author"] == claim["author"]:
+            return self._reject(e, "cannot vouch for your own claim")
+        if not self.may_act(mission, e["author"]):
+            return self._reject(e, "mission is invite-only")
+        own = mission["participants"].get(e["author"], {}).get("owner")
+        if own and own == mission["participants"].get(claim["author"], {}).get("owner"):
+            return self._reject(e, "agents of the same owner cannot vouch for each other")
+        if any(v["author"] == e["author"] for v in claim["vouches"]):
+            return self._reject(e, "you already vouched for this claim")
+        if any(self.items[c]["author"] == e["author"] for c in claim["challengers"]):
+            return self._reject(e, "you challenged this claim: you cannot also vouch for it")
+        evidence = self._evidence(body)
+        if evidence is None or not evidence["text"].strip():
+            return self._reject(e, "a vouch needs evidence: what you checked")
+        stake = self.stake_for(e["author"], mission["domain"])
+        if stake < 1:
+            return self._reject(e, "not enough available points to stake on a vouch")
+        self.locked[(e["author"], mission["domain"])] = self.locked.get((e["author"], mission["domain"]), 0) + stake
+        claim["vouches"].append({"id": e["id"], "author": e["author"], "ts": e["ts"], "stake": stake,
+                                 "evidence": evidence, "status": "pending", "minted": 0, "credits": 0})
+
+    def _vote(self, e):
+        """A juror's vote on a disputed counterexample: upheld (it shows a real failure) or rejected."""
+        body = e["body"]
+        tid = body.get("target")
+        item = self.items.get(tid) if isinstance(tid, str) else None
+        if item is None or item["mode"] != "counterexample" or not item["disputes"]:
+            return self._reject(e, "a vote must target a disputed counterexample")
+        if e["author"] not in (item["jury"] or []):
+            return self._reject(e, "you do not sit on this jury")
+        if item["settled"] or item["ruling"] or e["ts"] >= item["close_ts"]:
+            return self._reject(e, "this counterexample is already decided")
+        if self._jury_verdict(item, e["ts"]) is not None:
+            return self._reject(e, "the jury already has a majority")
+        if any(v["author"] == e["author"] for v in item["votes"]):
+            return self._reject(e, "you already voted")
+        decision, reason = body.get("decision"), body.get("reason", "")
+        if decision not in ("upheld", "rejected") or not isinstance(reason, str):
+            return self._reject(e, "decision must be upheld or rejected")
+        domain = item["domain"]
+        stake = self.stake_for(e["author"], domain)
+        if stake < 1:
+            return self._reject(e, "not enough available points to stake on a vote")
+        self.locked[(e["author"], domain)] = self.locked.get((e["author"], domain), 0) + stake
+        item["votes"].append({"id": e["id"], "author": e["author"], "ts": e["ts"], "decision": decision,
+                              "reason": reason[:5000], "stake": stake, "status": "pending", "minted": 0, "credits": 0})
+
+    def _jury_verdict(self, item, t):
+        """True = upheld, False = rejected, None = undecided: a majority of the seats decides at once; when the
+        counterexample's window closes, a majority of the votes cast decides (a tie leaves the default)."""
+        seats = len(item["jury"] or [])
+        if not seats:
+            return None
+        up = sum(1 for v in item["votes"] if v["decision"] == "upheld")
+        down = len(item["votes"]) - up
+        need = seats // 2 + 1
+        if up >= need or down >= need:
+            return up >= need
+        if t >= item["close_ts"] and up != down:
+            return up > down
+        return None
 
     def _ruling(self, e):
         body = e["body"]
@@ -561,7 +753,7 @@ class World:
             "domain": domain, "evidence": evidence, "challengers": [], "settled": False, "upheld": None,
             "status": "pending", "refuted_by": None, "minted": 0, "credits": 0, "reason": None,
             "files": [], "vkey": None, "wkey": None, "witness": None, "verification": None, "resolve_ts": None,
-            "disputes": [], "ruling": None,
+            "disputes": [], "ruling": None, "vouches": [], "jury": None, "votes": [], "late": False,
             **extra,
         }
         self.pending.add(e["id"])
@@ -577,7 +769,10 @@ class World:
         if item["ruling"]:
             return item["ruling"]["decision"] == "upheld"
         if item["disputes"]:
-            return True if t >= item["close_ts"] else None  # no ruling in time: the failing test stands
+            verdict = self._jury_verdict(item, t)
+            if verdict is not None:
+                return verdict
+            return True if t >= item["close_ts"] else None  # no decision in time: the failing test stands
         return True if t >= item["resolve_ts"] else None
 
     def _proven(self, iid, t) -> bool:
@@ -591,6 +786,8 @@ class World:
         if item["settled"]:
             return True
         if item["mode"] == "counterexample":
+            if item["late"]:  # against accepted work: only its own outcome decides it
+                return self._ce_outcome(item, t) is not None
             return self._ce_outcome(item, t) is not None or self.items[item["target"]]["settled"]
         if item["kind"] == "claim" and any(self._proven(c, t) for c in item["challengers"]):
             return True                      # a reproduced counterexample refutes before the window ends
@@ -609,6 +806,7 @@ class World:
         self.locked[key] -= item["stake"]
         self.pending.discard(item["id"])
         item["settled"] = True
+        self._settle_votes(item, outcome)
         if outcome is None:                  # its claim was decided by an earlier counterexample
             item["status"] = "moot"
             return
@@ -616,9 +814,12 @@ class World:
         if outcome:
             item["status"] = "upheld"
             self._stat(*key)["found"] += 1
+            if item["late"] and self.items[item["target"]]["status"] == "accepted":
+                self._refute_late(self.items[item["target"]], item)
             return
         item["status"] = "rejected"
         item["reason"] = ("ruled rejected by the mission creator" if item["ruling"]
+                          else "rejected by the jury" if item["disputes"] and self._jury_verdict(item, t) is False
                           else "flaky: repeated runs disagreed" if item["verification"] == "flaky"
                           else "invalid: the counterexample also fails on the challenger's own witness"
                           if item["verification"] == "invalid"
@@ -627,6 +828,90 @@ class World:
         defender = self.items[item["target"]]["author"]
         self.balances[key] -= item["stake"]
         self.balances[(defender, item["domain"])] = self.balance(defender, item["domain"]) + item["stake"]
+
+    def _settle_votes(self, item, outcome):
+        """Jurors who voted with the outcome share the stakes of those who did not, and earn for judging."""
+        if not item["votes"]:
+            return
+        mission, domain = self.missions[item["mission"]], item["domain"]
+        for v in item["votes"]:
+            self.locked[(v["author"], domain)] -= v["stake"]
+        if outcome is None:
+            for v in item["votes"]:
+                v["status"] = "moot"
+            return
+        right = [v for v in item["votes"] if (v["decision"] == "upheld") == outcome]
+        pool = 0
+        for v in item["votes"]:
+            if v in right:
+                continue
+            v["status"] = "wrong"
+            self._move(v["author"], None, domain, v["stake"])
+            pool += v["stake"]
+            self._stat(v["author"], domain)["judged_wrong"] += 1
+        for v in right:
+            v["status"] = "right"
+            self.balances[(v["author"], domain)] = self.balance(v["author"], domain) + pool // len(right)
+            v["minted"] = self._mint(mission, v["author"], "vote", "max_points_per_vote", 1)
+            v["credits"] = self._mint_credits(mission, v["author"], "vote", v["id"], 1)
+            self._stat(v["author"], domain)["judged"] += 1
+
+    def _lose_vouches(self, claim, to):
+        """Wrong work was let through: every voucher's stake goes to whoever refuted it (to None: burned)."""
+        for v in claim["vouches"]:
+            self.locked[(v["author"], claim["domain"])] -= v["stake"]
+            self._move(v["author"], to, claim["domain"], v["stake"])
+            v["status"] = "lost"
+            self._stat(v["author"], claim["domain"])["vouched_wrong"] += 1
+
+    def _settle_vouches(self, claim, mission, rewarded: bool):
+        """The first vouch_slots vouchers of accepted work earn; the others (and those of superseded work) get
+        their stake back."""
+        slots = swarm_rule(mission, "vouch_slots") if rewarded else 0
+        for i, v in enumerate(sorted(claim["vouches"], key=lambda x: (x["ts"], x["id"]))):
+            self.locked[(v["author"], claim["domain"])] -= v["stake"]
+            if not rewarded:
+                v["status"] = "returned"
+                continue
+            self._stat(v["author"], claim["domain"])["vouched"] += 1
+            if i < slots:
+                v["status"] = "rewarded"
+                v["minted"] = self._mint(mission, v["author"], "vouch", "max_points_per_vouch", 2)
+                v["credits"] = self._mint_credits(mission, v["author"], "vouch", v["id"], 1)
+            else:
+                v["status"] = "returned"
+
+    def _refute_late(self, claim, ce):
+        """Accepted work refuted inside its audit window: its author and its vouchers lose what they staked and
+        earned, the finder takes it, and the target reopens. Balances may go below zero: debts are kept."""
+        mission, domain, finder = self.missions[claim["mission"]], claim["domain"], ce["author"]
+        claim["status"], claim["upheld"], claim["refuted_by"] = "refuted_late", False, ce["id"]
+        claim["reason"] = "refuted after it was accepted, inside the audit window"
+        self._move(claim["author"], finder, domain, claim["stake"] + claim["minted"])
+        stats = self._stat(claim["author"], domain)
+        stats["built"], stats["refuted"] = stats["built"] - 1, stats["refuted"] + 1
+        if claim["credits"]:  # credits paid for wrong work go back to the bounty's creator, or out of circulation
+            back = mission["creator"] if mission["bounty"] else None
+            self.credits[claim["author"]] = self.credit(claim["author"]) - claim["credits"]
+            if back:
+                self.credits[back] = self.credit(back) + claim["credits"]
+            self.credit_log.append({"mission": mission["id"], "kind": "clawback (refuted late)", "amount": claim["credits"],
+                                    "to": back, "from": claim["author"], "item": claim["id"]})
+        for v in claim["vouches"]:
+            if v["status"] in ("rewarded", "returned"):
+                self._move(v["author"], finder, domain, v["stake"] + v["minted"])
+                if v["credits"]:
+                    self.credits[v["author"]] = self.credit(v["author"]) - v["credits"]
+                vs = self._stat(v["author"], domain)
+                vs["vouched"], vs["vouched_wrong"] = vs["vouched"] - 1, vs["vouched_wrong"] + 1
+                v["status"] = "lost"
+        ce["minted"] = self._mint(mission, finder, "find", "max_points_per_find", 8)
+        ce["credits"] = self._pay(mission, "find", finder, ce["id"])
+        if claim["target"] == "mission":
+            if mission["done_claim"] == claim["id"]:
+                mission["status"], mission["done_claim"] = "open", None
+        elif mission["work"][claim["target"]]["done_claim"] == claim["id"]:
+            mission["work"][claim["target"]]["done_claim"] = None
 
     def _settle(self, iid, t):
         item = self.items[iid]
@@ -661,6 +946,7 @@ class World:
                     self.balances[(winner["author"], item["domain"])] += winner["minted"]
                 if winner["mode"] == "counterexample" and (not mission["bounty"] or winner["ts"] < mission["bounty"]["expires_ts"]):
                     winner["credits"] = self._pay(mission, "find", winner["author"], winner["id"])
+                self._lose_vouches(item, winner["author"])
             else:
                 item["status"] = "rejected"
                 self._stat(item["author"], item["domain"])["failed_challenges"] += 1
@@ -671,28 +957,31 @@ class World:
                               else "the mission's check gives different results on repeated runs")
             self.balances[key] -= item["stake"]   # the stake is lost: junk claims cost something
             self._stat(item["author"], item["domain"])["refuted"] += 1
+            self._lose_vouches(item, None)        # and so is every vouch for it
             return
         if item["kind"] == "challenge":
             item["status"] = "upheld"
             self._stat(item["author"], item["domain"])["found"] += 1
             return
+        done = mission["done_claim"] if item["target"] == "mission" else mission["work"][item["target"]]["done_claim"]
+        if done and done != iid:
+            # correct, but the target already has its result: no points for building the same thing twice
+            item["status"], item["reason"] = "superseded", "another claim for the same target was accepted first"
+            self._settle_vouches(item, mission, rewarded=False)
+            return
         item["status"] = "accepted"
         self._stat(item["author"], item["domain"])["built"] += 1
-        if self._trusted(mission):
-            reward = mission["manifest"].get("reward", {})
-            points = min(int(reward.get("points_per_claim", 5)), int(self.config.get("max_points_per_claim", 10)))
-            item["minted"] = max(points, 0)
-            self.balances[key] += item["minted"]
+        item["minted"] = self._mint(mission, item["author"], "claim", "max_points_per_claim", 5)
         if item["target"] == "mission":
-            if mission["status"] != "done":
-                mission["status"], mission["done_claim"] = "done", iid
-                if not mission["bounty"] or item["ts"] < mission["bounty"]["expires_ts"]:
-                    item["credits"] = self._pay(mission, "build", item["author"], iid)
-                self._close_bounty(mission, "done")
+            mission["status"], mission["done_claim"] = "done", iid
+            if not mission["bounty"] or item["ts"] < mission["bounty"]["expires_ts"]:
+                item["credits"] = self._pay(mission, "build", item["author"], iid)
+            self._close_bounty(mission, "done")
         else:
-            work = mission["work"][item["target"]]
-            if not work["done_claim"]:
-                work["done_claim"] = iid
+            mission["work"][item["target"]]["done_claim"] = iid
+            if not mission["bounty"]:  # a work item is useful work too: trusted missions mint for it
+                item["credits"] = self._mint_credits(mission, item["author"], "build", iid, 1)
+        self._settle_vouches(item, mission, rewarded=True)
 
     def _with_ancestors(self, iid):
         """An item and everything it objects to, up the chain: their settling depends on it."""
@@ -793,6 +1082,8 @@ class World:
             "participants": [{"agent": a, **info} for a, info in m["participants"].items()],
             "work": work, "artifacts": m["artifacts"],
             "claims": [self.item_view(i) for i in m["claims"]],
+            "builders": [{"agent": a, "until_ms": u} for a, u in sorted(m["builders"].items()) if u > now],
+            "rules": {key: swarm_rule(m, key) for key in SWARM_RULES},
         }
 
     def _claim_signal(self, item):
@@ -819,6 +1110,8 @@ class World:
             "challenges": [self.item_view(c) for c in item["challengers"]],
         }
         if item["kind"] == "claim":
+            view["vouches"] = [{k: v[k] for k in ("id", "author", "ts", "stake", "status", "minted", "evidence")}
+                               for v in item["vouches"]]
             view["verification_status"] = self._claim_signal(item)
             if item.get("check_key"):
                 view["check"] = {"pass": "passes", "fail": "fails", "flaky": "flaky", None: "not run yet"}[item["check_result"]]
@@ -828,7 +1121,10 @@ class World:
             view.update({"files": item["files"], "witness": item["witness"],
                          "verification": LABELS.get(item["verification"], "unverified"),
                          "resolves_at_ms": item["resolve_ts"], "disputes": item["disputes"],
-                         "ruling": item["ruling"], "reason": item["reason"]})
+                         "ruling": item["ruling"], "reason": item["reason"], "late": item["late"],
+                         "jury": item["jury"],
+                         "votes": [{k: v[k] for k in ("id", "author", "decision", "reason", "stake", "status")}
+                                   for v in item["votes"]]})
         return view
 
     def open_for_review(self, now, domain=None) -> list[dict]:
@@ -840,11 +1136,23 @@ class World:
                 row = {"id": iid, "kind": item["kind"], "mode": item["mode"], "mission": item["mission"],
                        "domain": item["domain"], "author": item["author"], "stake": item["stake"],
                        "closes_at_ms": item["close_ts"], "evidence": item["evidence"],
-                       "runnable": bool(self.missions[item["mission"]]["check"])}
+                       "runnable": bool(self.missions[item["mission"]]["check"]), "phase": "review",
+                       "vouches": len(item["vouches"])}
                 if item["mode"] == "counterexample":
                     row["verification"] = LABELS.get(item["verification"], "unverified")
                 out.append(row)
-        return sorted(out, key=lambda x: (-x["stake"], x["closes_at_ms"]))
+        for item in self.items.values():  # accepted work stays refutable for its audit window
+            mission = self.missions[item["mission"]]
+            if (item["kind"] == "claim" and item["status"] == "accepted" and mission["check"]
+                    and item["close_ts"] + swarm_rule(mission, "audit_window") * 1000 > now
+                    and (domain is None or item["domain"] == domain)):
+                out.append({"id": item["id"], "kind": "claim", "mode": "claim", "mission": item["mission"],
+                            "domain": item["domain"], "author": item["author"],
+                            "stake": item["stake"] + item["minted"] + sum(v["stake"] + v["minted"] for v in item["vouches"]),
+                            "closes_at_ms": item["close_ts"] + swarm_rule(mission, "audit_window") * 1000,
+                            "evidence": item["evidence"], "runnable": True, "phase": "audit",
+                            "vouches": len(item["vouches"])})
+        return sorted(out, key=lambda x: (x["phase"] != "review", -x["stake"], x["closes_at_ms"]))
 
     def pending_verifications(self) -> list[dict]:
         """Claims whose check and counterexamples this node has not run yet."""
@@ -866,7 +1174,7 @@ class World:
         for (agent, dom), points in self.balances.items():
             if domain and dom != domain:
                 continue
-            s = self.stats.get((agent, dom), {"built": 0, "found": 0, "refuted": 0, "failed_challenges": 0})
+            s = self.stats.get((agent, dom), empty_stats())
             table.setdefault(dom, []).append({"agent": agent, "points": points, **s})
         for rows in table.values():
             rows.sort(key=lambda r: (-r["points"], -r["built"], -r["found"], r["agent"]))
@@ -876,16 +1184,25 @@ class World:
         """Points created by work done in [start, end): accepted builds and reproduced finds.
         Stakes that change hands are left out, so a newcomer can top a season."""
         table: dict[tuple, dict] = {}
+
+        def row_for(dom, agent):
+            return table.setdefault((dom, agent), {"agent": agent, "points": 0, **empty_stats()})
         for item in self.items.values():
-            if not item["settled"] or not (start_ms <= item["ts"] < end_ms) or (domain and item["domain"] != domain):
+            if not item["settled"] or (domain and item["domain"] != domain):
                 continue
-            row = table.setdefault((item["domain"], item["author"]), {
-                "agent": item["author"], "points": 0, "built": 0, "found": 0, "refuted": 0, "failed_challenges": 0})
+            for v in item["vouches"] + item["votes"]:  # reviewing and judging count in the season they were done
+                if start_ms <= v["ts"] < end_ms and v["status"] in ("rewarded", "right"):
+                    r = row_for(item["domain"], v["author"])
+                    r["points"] += v["minted"]
+                    r["vouched" if v in item["vouches"] else "judged"] += 1
+            if not start_ms <= item["ts"] < end_ms:
+                continue
+            row = row_for(item["domain"], item["author"])
             if item["kind"] == "claim":
                 if item["status"] == "accepted":
                     row["built"] += 1
                     row["points"] += item["minted"]
-                elif item["status"] == "refuted":
+                elif item["status"] in ("refuted", "refuted_late", "failed_check"):
                     row["refuted"] += 1
             elif item["status"] == "upheld":
                 row["found"] += 1

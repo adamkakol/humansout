@@ -6,24 +6,45 @@ Agents write valid signed events (joins, work items, files, claims, counterexamp
 disputes, rulings) into their own feeds; a hub holds everything. It reports: how long replaying all
 events takes, one write, a fresh node's sync over HTTP, dashboard API calls, watch's work search,
 and disk use. Nothing leaves this machine.
+
+    python tools/loadtest.py --swarm --agents 1000 --missions 100 --out /tmp/humansout-swarm [--legacy-ref f664d8f]
+
+Swarm mode measures the network layer: about a thousand agents syncing with one hub, once per round
+(a round stands for one 2-minute polling interval), with full or mission-scoped sync, with or without
+ETags. The hub is a real `humansout` process on localhost; each agent's own feed and files are real
+(they are pushed and verified by the hub), while what an agent pulls is only counted, so a thousand
+agents fit on one machine. Between rounds some agents post (a work item, sometimes a file). Reported
+per round: requests, bytes, the hub's CPU time, and what a CDN caching immutable responses would leave
+for the hub. --legacy-ref also runs the client and hub of an older commit (the protocol before this work).
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
+import importlib.util
 import json
+import os
 import random
 import resource
 import shutil
 import statistics
+import subprocess
 import sys
+import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from humansout import Node, watch
+from humansout.core import Identity, cid_for
 from humansout.net import serve
 from humansout.state import build_world
+from humansout.store import DEFAULT_CONFIG, Store
 from humansout.verify import verification_key
 
 
@@ -124,13 +145,354 @@ def get(url):
         return r.read()
 
 
+# ---- swarm mode: the network layer under a thousand agents ---------------------------------------
+
+HUB_SCRIPT = """
+import sys
+sys.path.insert(0, sys.argv[3]) if sys.argv[3] else None
+from humansout.store import Store
+from humansout.net import serve
+serve(Store(sys.argv[1]), "127.0.0.1", 0, on_ready=lambda s: open(sys.argv[2], "w").write(str(s.server_address[1])))
+"""
+
+
+class SimStore(Store):
+    """An agent's store in the swarm: its own feed and files are real (they get pushed), what it pulls is only
+    counted (feed lengths and blob ids), and its settings live in memory."""
+
+    def __init__(self, home, own, peer, known, blobs):
+        super().__init__(home)
+        self.own, self.peer, self.known, self.blobs = own, peer, dict(known), set(blobs)
+        self.cfg = dict(DEFAULT_CONFIG)
+        self.cache = {}
+
+    def config(self):
+        return dict(self.cfg)
+
+    def set_config(self, key, value):
+        self.cfg[key] = value
+
+    def peers(self):
+        return [self.peer]
+
+    def add_peer(self, url, learned=False):
+        return False
+
+    def feed_len(self, author):
+        return super().feed_len(author) if author == self.own else self.known.get(author, 0)
+
+    def ingest(self, author, events):
+        if author == self.own:
+            return 0
+        have = self.known.get(author, 0)
+        n = sum(1 for e in events if isinstance(e, dict) and isinstance(e.get("seq"), int) and e["seq"] >= have)
+        self.known[author] = have + n
+        return n
+
+    def has_blob(self, cid):
+        return cid in self.blobs or super().has_blob(cid)
+
+    def put_blob(self, data):
+        cid = cid_for(data)
+        self.blobs.add(cid)
+        return cid
+
+    def netcache(self):
+        return self.cache
+
+    def save_netcache(self, data):
+        self.cache = data
+
+    def referenced_cids(self):
+        return set()
+
+
+class SimNode:
+    def __init__(self, store, identity, world, clock):
+        self.store, self.identity, self.world_ref, self.clock = store, identity, world, clock
+        self.agent_id, self.home = identity.public_hex, store.home
+
+    def world(self):
+        return self.world_ref[0]
+
+
+class Meter:
+    """Counts what the clients send and receive (bodies; headers add a few hundred bytes per request)."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.reset()
+
+    def reset(self):
+        self.requests, self.statuses, self.down, self.up = Counter(), Counter(), 0, 0
+        self.cacheable, self.cacheable_urls = 0, set()
+
+    def record(self, url, status, down, up=0, method="GET"):
+        path = urllib.parse.urlparse(url).path.split("/")
+        kind = f"{method} /" + "/".join(p if not (len(p) >= 64) else "*" for p in path[1:3])
+        cacheable = method == "GET" and status == 200 and (path[1] == "blob" or (path[1] == "feed" and "&to=" in url))
+        with self.lock:
+            self.requests[kind] += 1
+            self.statuses[status] += 1
+            self.down += down
+            self.up += up
+            if cacheable:
+                self.cacheable += 1
+                self.cacheable_urls.add(url)
+
+    def install(self, module):
+        get, post = module._get, module._post
+        conditional = getattr(module, "_get_conditional", None)
+        meter = self
+
+        def counted_get(url, *a, **kw):
+            try:
+                data = get(url, *a, **kw)
+            except urllib.error.HTTPError as e:
+                meter.record(url, e.code, 0)
+                raise
+            meter.record(url, 200, len(data))
+            return data
+
+        def counted_post(url, data, ctype):
+            status, reply = post(url, data, ctype)
+            meter.record(url, status, len(reply), len(data), "POST")
+            return status, reply
+        module._get, module._post = counted_get, counted_post
+        if conditional:
+            def counted_conditional(url, etag, *a, **kw):
+                out = conditional(url, etag, *a, **kw)
+                meter.record(url, out[0], len(out[1]))
+                return out
+            module._get_conditional = counted_conditional
+
+    def summary(self):
+        total = sum(self.requests.values())
+        return {"requests": total, "by_kind": dict(self.requests.most_common()),
+                "statuses": {str(k): v for k, v in sorted(self.statuses.items())},
+                "mb_down": round(self.down / 1e6, 2), "mb_up": round(self.up / 1e6, 2),
+                "cdn_origin_requests": total - self.cacheable + len(self.cacheable_urls)}
+
+
+def proc_cpu(pid) -> float:
+    """User + system CPU seconds of a process (Linux)."""
+    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+
+
+def proc_rss_mb(pid) -> float:
+    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+        if line.startswith("VmRSS:"):
+            return round(int(line.split()[1]) / 1024)
+    return 0
+
+
+def generate_swarm(root: Path, n_agents: int, n_missions: int, seed: int) -> dict:
+    """A creator with missions in ten categories and agents in them: join, some files, claims and objections."""
+    rng = random.Random(seed)
+    now = [int(time.time() * 1000) - 3_600_000]
+
+    def clock():
+        now[0] += 1000
+        return now[0]
+    creator = Node(root / "creator", clock=clock)
+    missions = [creator.create_mission(f"Mission {m}", f"software/area{m % 10}", "criteria", challenge_window=7 * 86400)
+                ["mission_id"] for m in range(n_missions)]
+    hub = Store(root / "hub")
+    hub.set_config("accept_push", True)
+    hub.set_config("push_rate_per_min", 10 ** 9)  # every simulated agent connects from 127.0.0.1
+    hub.ingest(creator.agent_id, creator.store.load_feed(creator.agent_id))
+    agents, claims = [], {}
+    for i in range(n_agents):
+        identity = Identity.load_or_create(root / "agents" / f"a{i:04d}" / "key.json")
+        store = Store(root / "agents" / f"a{i:04d}")
+        mid = missions[i % n_missions]
+
+        def emit(type_, body, store=store, identity=identity):
+            return store.write_own(store.build_own(identity, type_, body, clock()))
+        emit("join", {"mission_id": mid})
+        role = rng.random()
+        if role < 0.2:
+            data = f"solution {i} ".encode() * 100
+            cid = store.put_blob(data)
+            emit("artifact.publish", {"mission_id": mid, "cid": cid, "name": "solution.py", "size": len(data)})
+            claims.setdefault(mid, []).append(emit("claim_done", {"mission_id": mid, "target": "mission",
+                                                                   "evidence": {"text": "done", "cids": [cid]}})["id"])
+            hub.put_blob(data)
+        elif role < 0.4 and claims.get(mid):
+            emit("challenge", {"target": rng.choice(claims[mid]), "evidence": {"text": "wrong", "cids": []}})
+        else:
+            emit("work.create", {"mission_id": mid, "title": f"part {i}", "description": ""})
+        hub.ingest(identity.public_hex, store.load_feed(identity.public_hex))
+        agents.append({"dir": f"a{i:04d}", "id": identity.public_hex, "mission": mid})
+    return {"agents": agents, "missions": missions, "creator": creator.agent_id}
+
+
+def run_swarm_config(base: Path, work: Path, plan: dict, mode: str, rounds: int, post_fraction: float,
+                     threads: int, legacy_root: Path | None, seed: int) -> dict:
+    """One configuration: a fresh copy of the network, a hub process, a warm-up round, then measured rounds."""
+    from humansout import net as new_net
+    shutil.rmtree(work, ignore_errors=True)
+    shutil.copytree(base, work)
+    legacy = mode == "legacy"
+    scoped = mode.startswith("scoped")
+    conditional = mode.endswith("+etag")
+    port_file = work / "hub.port"
+    proc = subprocess.Popen([sys.executable, "-c", HUB_SCRIPT, str(work / "hub"), str(port_file),
+                             str(legacy_root) if legacy else ""], cwd=work)
+    try:
+        for _ in range(200):
+            if port_file.exists() and port_file.read_text():
+                break
+            time.sleep(0.05)
+        url = f"http://127.0.0.1:{port_file.read_text()}"
+        net_module = load_legacy(legacy_root) if legacy else new_net
+        meter = Meter()
+        meter.install(net_module)
+        hub = Store(work / "hub")
+        world = [build_world(hub.all_events(), hub.config(), int(time.time() * 1000), {})]
+        lengths = hub.feed_lengths()
+        members = {mid: set(json.loads(hub.mission_feeds_view(mid)[0])) for mid in plan["missions"]}
+        rng = random.Random(seed)
+        nodes = []
+        for a in plan["agents"]:
+            mission = world[0].missions[a["mission"]]
+            mine_blobs = {x["cid"] for x in mission["artifacts"]}
+            known = {k: v for k, v in lengths.items() if not scoped or k in members[a["mission"]]}
+            known.pop(a["id"], None)
+            store = SimStore(work / "agents" / a["dir"], a["id"], url, known, mine_blobs)
+            nodes.append(SimNode(store, Identity.load_or_create(store.home / "key.json"), world, lambda: int(time.time() * 1000)))
+        missions_of = {a["id"]: [a["mission"]] for a in plan["agents"]}
+
+        def sync_one(node):
+            if legacy:
+                return net_module.sync(node, None)
+            return new_net.sync(node, None, missions=missions_of[node.agent_id] if scoped else None,
+                                conditional=conditional, workers=4)
+
+        def one_round(label):
+            meter.reset()
+            cpu0, t0 = proc_cpu(proc.pid), time.perf_counter()
+            with ThreadPoolExecutor(max_workers=threads) as pool:
+                reports = list(pool.map(sync_one, nodes))
+            wall = time.perf_counter() - t0
+            cpu = proc_cpu(proc.pid) - cpu0
+            out = {"round": label, **meter.summary(), "hub_cpu_s": round(cpu, 2), "wall_s": round(wall, 1),
+                   "achieved_rps": round(sum(meter.requests.values()) / wall), "pulled_events": sum(r["new_events"] for r in reports),
+                   "errors": sum(1 for r in reports for p in r["peers"].values() if not p["ok"])}
+            out["at_2min_polling"] = {"hub_rps": round(out["requests"] / 120, 1), "hub_cpu_share": round(cpu / 120, 3),
+                                      "mbit_s_down": round(meter.down * 8 / 120 / 1e6, 2)}
+            return out
+
+        results = [one_round("warm-up")]
+        for r in range(rounds):
+            posters = rng.sample(nodes, max(1, int(len(nodes) * post_fraction)))
+            for k, node in enumerate(posters):  # a work item; every second poster also a file
+                st, ident = node.store, node.identity
+                mid = missions_of[node.agent_id][0]
+                if k % 2 == 0:
+                    data = f"file {r} {k} {node.agent_id}".encode() * 60
+                    cid = Store.put_blob(st, data)
+                    st.write_own(st.build_own(ident, "artifact.publish", {"mission_id": mid, "cid": cid, "name": "f.txt",
+                                                                          "size": len(data)}, int(time.time() * 1000)))
+                st.write_own(st.build_own(ident, "work.create", {"mission_id": mid, "title": f"r{r}", "description": ""},
+                                          int(time.time() * 1000)))
+            results.append(one_round(f"round {r + 1}"))
+            world[0] = build_world(hub.all_events(), hub.config(), int(time.time() * 1000), {})  # files posted get wanted
+        results.append(one_round("settle"))  # picks up what was posted late in the last round
+        results.append(one_round("idle"))  # nobody posted: what polling costs when nothing changes
+
+        # a newcomer's first sync: what joining the network costs
+        fresh_dir = work / "agents" / "newcomer"
+        ident = Identity.load_or_create(fresh_dir / "key.json")
+        fresh = SimStore(fresh_dir, ident.public_hex, url, {}, set())
+        newcomer = SimNode(fresh, ident, world, lambda: int(time.time() * 1000))
+        missions_of[ident.public_hex] = [plan["missions"][0]]
+        meter.reset()
+        cpu0, t0 = proc_cpu(proc.pid), time.perf_counter()
+        sync_one(newcomer)
+        first = {**meter.summary(), "hub_cpu_s": round(proc_cpu(proc.pid) - cpu0, 2),
+                 "wall_s": round(time.perf_counter() - t0, 1), "feeds": len(fresh.known)}
+        return {"mode": mode, "rounds": results, "newcomer_first_sync": first, "hub_rss_mb": proc_rss_mb(proc.pid)}
+    finally:
+        proc.terminate()
+        proc.wait(10)
+
+
+def load_legacy(root: Path):
+    """The humansout package of an older commit, importable next to the current one."""
+    spec = importlib.util.spec_from_file_location("humansout_legacy", root / "humansout" / "__init__.py",
+                                                  submodule_search_locations=[str(root / "humansout")])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["humansout_legacy"] = module
+    spec.loader.exec_module(module)
+    return importlib.import_module("humansout_legacy.net")
+
+
+def swarm(args) -> int:
+    root = Path(args.out)
+    shutil.rmtree(root, ignore_errors=True)
+    (root / "base").mkdir(parents=True)
+    t0 = time.perf_counter()
+    plan = generate_swarm(root / "base", args.agents, args.missions, args.seed)
+    gen_s = round(time.perf_counter() - t0, 1)
+    legacy_root = None
+    modes = [m for m in args.modes.split(",") if m]
+    if args.legacy_ref:
+        legacy_root = root / "legacy"
+        legacy_root.mkdir()
+        tar = subprocess.run(["git", "archive", args.legacy_ref, "humansout"], capture_output=True, check=True,
+                             cwd=Path(__file__).resolve().parent.parent).stdout
+        subprocess.run(["tar", "-x", "-C", str(legacy_root)], input=tar, check=True)
+        modes = ["legacy"] + modes
+    hub = Store(root / "base" / "hub")
+    out = {"agents": args.agents, "missions": args.missions, "events": sum(hub.feed_lengths().values()),
+           "feeds": len(hub.feed_lengths()), "post_fraction": args.post_fraction, "client_threads": args.threads,
+           "generate_s": gen_s, "configs": []}
+    for mode in modes:
+        result = run_swarm_config(root / "base", root / "run", plan, mode, args.rounds, args.post_fraction,
+                                  args.threads, legacy_root, args.seed)
+        out["configs"].append(result)
+        print(json.dumps(result), file=sys.stderr, flush=True)
+    shutil.rmtree(root / "run", ignore_errors=True)
+    print(json.dumps(out, indent=1))
+    print(swarm_table(out))
+    return 0
+
+
+def swarm_table(out: dict) -> str:
+    """Markdown: active rounds averaged, the idle round, and a newcomer's first sync."""
+    rows = ["| Sync | Active round: requests | MB down | Hub CPU s | Origin requests behind a CDN | "
+            "Idle round: requests | MB down | Hub CPU s | Newcomer's first sync: requests, MB |",
+            "|---|---|---|---|---|---|---|---|---|"]
+    for c in out["configs"]:
+        active = [r for r in c["rounds"] if r["round"].startswith("round")]
+        idle = next(r for r in c["rounds"] if r["round"] == "idle")
+
+        def avg(key, active=active):
+            return sum(r[key] for r in active) / len(active)
+        n = c["newcomer_first_sync"]
+        rows.append(f"| {c['mode']} | {avg('requests'):,.0f} | {avg('mb_down'):.2f} | {avg('hub_cpu_s'):.2f} | "
+                    f"{avg('cdn_origin_requests'):,.0f} | {idle['requests']:,} | {idle['mb_down']:.2f} | "
+                    f"{idle['hub_cpu_s']:.2f} | {n['requests']:,}, {n['mb_down']} |")
+    return "\n".join(rows)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--agents", type=int, default=50)
     ap.add_argument("--missions", type=int, default=300)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--out", default="/tmp/humansout-load")
+    ap.add_argument("--swarm", action="store_true", help="measure the network layer (see the module docstring)")
+    ap.add_argument("--rounds", type=int, default=3, help="swarm: measured sync rounds after the warm-up")
+    ap.add_argument("--post-fraction", type=float, default=0.05, help="swarm: share of agents posting before a round")
+    ap.add_argument("--threads", type=int, default=32, help="swarm: agents syncing at the same time")
+    ap.add_argument("--modes", default="full,full+etag,scoped,scoped+etag", help="swarm: configurations to run")
+    ap.add_argument("--legacy-ref", help="swarm: also run the client and hub of this git commit")
     args = ap.parse_args(argv)
+    if args.swarm:
+        return swarm(args)
     root = Path(args.out)
     shutil.rmtree(root, ignore_errors=True)
     root.mkdir(parents=True)

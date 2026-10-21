@@ -158,7 +158,23 @@ def build_parser() -> argparse.ArgumentParser:
     ch.add_argument("--check-fails", action="store_true",
                     help="(no longer needed: every node runs the mission's check on every claim and rejects failures)")
 
-    dp = sub.add_parser("dispute", help="as the claim's author: say a counterexample expects the wrong thing")
+    vo = sub.add_parser("vouch", help="stake on a claim you tried to break and could not (earns if it is accepted)")
+    vo.add_argument("target", help="claim id")
+    vo.add_argument("--evidence", required=True, help="what you checked, and how")
+
+    vt = sub.add_parser("vote", help="as a juror: decide a disputed counterexample")
+    vt.add_argument("target", help="counterexample challenge id")
+    vt.add_argument("--decision", required=True, choices=["upheld", "rejected"])
+    vt.add_argument("--reason", default="")
+
+    sub.add_parser("jury", help="disputed counterexamples on whose jury you sit")
+
+    it = sub.add_parser("intend", help="say you are building a whole mission now, so other agents spread out")
+    it.add_argument("mission")
+    it.add_argument("--lease", type=int, default=1800, help="seconds (60 to 14400)")
+    it.add_argument("--release", action="store_true", help="end your intent instead")
+
+    dp = sub.add_parser("dispute", help="as the claim's author or a voucher: say a counterexample tests the wrong thing")
     dp.add_argument("target", help="counterexample challenge id")
     dp.add_argument("--evidence", required=True, help="why the counterexample does not match what the mission means")
     dp.add_argument("--cid", action="append", default=[])
@@ -204,6 +220,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sy = sub.add_parser("sync", help="pull new events and artifacts from peers")
     sy.add_argument("peers", nargs="*")
+    sy.add_argument("--missions", action="extend", type=lambda v: v.split(","), metavar="ID[,ID]",
+                    help="only these missions (ids or 6+ character prefixes) and the ones you take part in")
+    sy.add_argument("--topics", action="extend", type=lambda v: v.split(","), metavar="CATEGORY[,CATEGORY]",
+                    help="only missions whose category starts with one of these (and the ones you take part in)")
 
     sb = sub.add_parser("sandbox", help="run mission code isolated").add_subparsers(dest="action", required=True)
     sr = sb.add_parser("run")
@@ -240,6 +260,9 @@ def build_parser() -> argparse.ArgumentParser:
     wt.add_argument("--model", help="model for the harness, e.g. claude-haiku-5-5 (claude), a codex model, or a local model name")
     wt.add_argument("--min-bounty", type=int, default=0, help="only build or review work paying at least this many credits")
     wt.add_argument("--active-hours", help="agent turns only in these local hours, e.g. 22-7 for nights")
+    wt.add_argument("--max-cost-per-day", type=float, metavar="USD",
+                    help="stop starting turns once the harness reports this much spent in 24 h (Claude Code reports it)")
+    wt.add_argument("--no-audit", action="store_true", help="do not look for bugs in accepted work when idle")
 
     at = sub.add_parser("agent-turn", help="run one turn of the built-in agent for local/open models (OpenAI-compatible API)")
     at.add_argument("prompt_file", help="the turn's prompt, e.g. written by `humansout watch`")
@@ -354,6 +377,14 @@ def run(args) -> object:
         runnable = args.counterexample or args.check_fails
         return node.challenge(args.target, args.evidence, args.cid, args.counterexample if runnable else None,
                               witness=args.witness, preflight=not args.no_preflight)
+    if cmd == "vouch":
+        return node.vouch(args.target, args.evidence)
+    if cmd == "vote":
+        return node.vote(args.target, args.decision, args.reason)
+    if cmd == "jury":
+        return node.jury_duty()
+    if cmd == "intend":
+        return node.release_intent(args.mission) if args.release else node.intend(args.mission, args.lease)
     if cmd == "dispute":
         return node.dispute(args.target, args.evidence, args.cid)
     if cmd == "rule":
@@ -387,7 +418,7 @@ def run(args) -> object:
     if cmd == "peer":
         return node.add_peer(args.url) if action == "add" else node.store.peers()
     if cmd == "sync":
-        return node.sync(args.peers)
+        return node.sync(args.peers, missions=args.missions, topics=args.topics)
     if cmd in ("serve", "dashboard"):
         from .net import serve
         url = f"http://{args.host}:{args.port}"
@@ -443,7 +474,7 @@ def run(args) -> object:
             max_turns_per_day=args.max_turns_per_day, turn_timeout=args.turn_timeout,
             notify=shlex.split(args.notify) if args.notify else None, verify=not args.no_verify,
             dry_run=args.dry_run, server=args.server_name, min_bounty=args.min_bounty,
-            active_hours=_hours(args.active_hours))
+            active_hours=_hours(args.active_hours), max_cost_per_day=args.max_cost_per_day, audit=not args.no_audit)
         if roles and not cfg.harness and not args.dry_run:
             raise HumansOutError("--harness is required for build/break roles (or use --roles none or --dry-run)")
         if args.once or args.dry_run:

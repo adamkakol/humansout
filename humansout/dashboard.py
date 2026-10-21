@@ -50,7 +50,7 @@ def sync_status(store: Store) -> dict | None:
         return None
 
 
-TURN_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-(build|review|respond)-[0-9a-f]{1,12}$")
+TURN_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-(build|review|respond|jury)-[0-9a-f]{1,12}$")
 
 
 def _turn_files(store: Store) -> dict[str, Path]:
@@ -115,13 +115,42 @@ def overview(store: Store, agent_id: str | None = None, now: int | None = None) 
             "objections": sum(i["kind"] == "challenge" for i in items),
             "awaiting_verification": sum(p["mission"] == mid for p in pending_verify),
             "needs_ruling": sum(i["mode"] == "counterexample" and bool(i["disputes"]) and not i["ruling"]
-                                and not i["settled"] for i in items),
+                                and not i["jury"] and not i["settled"] for i in items),  # juries need no human
+            "with_jury": sum(i["mode"] == "counterexample" and bool(i["jury"]) and not i["settled"] for i in items),
             "last_activity": max([m["ts"]] + [i["ts"] for i in items]),
             "bounty": ({k: m["bounty"][k] for k in ("build", "find", "finds_left", "closed")} if m["bounty"] else None),
         })
     missions.sort(key=lambda x: (x["status"] != "open", -x["last_activity"]))
+    events = store.all_events()
+    items = list(world.items.values())
+    network = {
+        "agents": len(store.feed_authors()), "events": len(events),
+        "claims": sum(i["kind"] == "claim" for i in items),
+        "counterexamples": sum(i["mode"] == "counterexample" for i in items),
+        "reproduced": sum(i["mode"] == "counterexample" and i["verification"] == "fail" for i in items),
+        "vouches": sum(len(i["vouches"]) for i in items),
+        "jury_verdicts": sum(i["mode"] == "counterexample" and i["settled"] and bool(i["jury"]) and not i["ruling"]
+                             and len(i["votes"]) > 0 for i in items),
+        "accepted": sum(i["status"] == "accepted" for i in items),
+        "humans_needed": sum(m["needs_ruling"] for m in missions),
+    }
+    stream = [{"ts": e["ts"], "type": e["type"], "author": e["author"], "id": e["id"], "summary": _summary(e, world)[:140],
+               "mission": _mission_of(e, world)}
+              for e in sorted(events, key=lambda x: (x["ts"], x["author"], x["seq"]))[-60:]]
     return {"agent_id": agent_id, "now": now, "missions": missions, "ranking": world.ranking(),
-            "peers": store.peers(), "watch": watch_status(store), "sync": sync_status(store)}
+            "peers": store.peers(), "watch": watch_status(store), "sync": sync_status(store),
+            "network": network, "stream": stream}
+
+
+def _mission_of(e: dict, world) -> str | None:
+    """The mission an event belongs to, for the live stream."""
+    b = e["body"]
+    if e["type"] == "mission.announce":
+        return sha256_hex(canonical(b["manifest"])) if isinstance(b.get("manifest"), dict) else None
+    if isinstance(b.get("mission_id"), str):
+        return b["mission_id"]
+    item = world.items.get(e["id"]) or world.items.get(b.get("target") if isinstance(b.get("target"), str) else "")
+    return item["mission"] if item else None
 
 
 def _summary(e: dict, world) -> str:
@@ -134,7 +163,13 @@ def _summary(e: dict, world) -> str:
     if t == "work.create":
         return f"work item: {b.get('title', '')}"
     if t in ("work.claim", "work.release"):
+        if b.get("work_id") == "mission":
+            return "building this mission" if t == "work.claim" else "stopped building"
         return f"{t.split('.')[1]} work item {str(b.get('work_id', ''))[:8]}"
+    if t == "vouch":
+        return "vouches: " + ((b.get("evidence") or {}).get("text") or "")[:560]
+    if t == "vote":
+        return f"jury vote {b.get('decision', '')}: {b.get('reason', '')}"[:600]
     if t == "artifact.publish":
         return f"published {b.get('name', '')}"
     if t in ("claim_done", "challenge", "dispute"):
@@ -170,7 +205,7 @@ def mission_detail(store: Store, mission_id: str, now: int | None = None) -> dic
                        target=item["target"], files=item["files"], cids=item["evidence"]["cids"])
             if item["mode"] == "counterexample":
                 row["verification"] = LABELS.get(item["verification"], "unverified")
-        if e["type"] in ("dispute", "ruling"):
+        if e["type"] in ("dispute", "ruling", "vouch", "vote"):
             row["target"] = b.get("target")
         timeline.append(row)
     view["timeline"] = timeline

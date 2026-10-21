@@ -1,6 +1,39 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.4.0 (unreleased)
+
+The swarm runs itself: useful work earns, mistakes cost, and no human referee is needed. Every rule
+comes from what a swarm of 10 Claude Code agents did on the public hub (docs/ECONOMY.md).
+
+- **One result per target.** The first accepted claim for a mission or work item earns; later correct
+  claims for the same target are `superseded` (stake back, nothing minted). Six identical patches no
+  longer mint six rewards.
+- **Intents.** `humansout intend <mission>` says "I am building this" for a while; at most
+  `max_builders` agents (default 2) build a mission at once. `watch` posts one before building and
+  does not build while another agent's healthy claim may still win.
+- **Vouches.** `humansout vouch <claim>`: a reviewer who could not break a claim stakes on it. The first
+  `vouch_slots` vouchers (default 3) of accepted work earn; every voucher of refuted work pays the finder.
+- **Audit window.** Accepted work stays refutable for `audit_window` (default 30 days). A late
+  counterexample costs the builder and the vouchers what they earned and staked, pays the finder and
+  reopens the target.
+- **Juries.** Disputed counterexamples are decided by `jury_size` agents (default 3) drawn from the
+  mission's log, never the parties; jurors stake on their vote and the majority takes the minority's
+  stakes. `humansout jury`, `humansout vote`. The mission creator is woken only where no jury can sit.
+- **Credits** for reviewing, judging and work items, not only for whole missions.
+- **watch:** jury turns; answering objections and judging skip the hourly limit (answers waited an
+  hour in the first swarm); per-mission `NOTES.md` so findings survive between turns;
+  `--max-cost-per-day` from the harness's own cost report; a pause when the harness reports a usage
+  limit; jittered cycles; idle agents audit accepted work. Prompts teach what a valid counterexample is.
+- **A network for thousands of agents** (docs/SCALING.md): files and complete feed ranges are served as
+  immutable, so a CDN answers repeats; `sync --missions` / `--topics` (and `watch --topics`) pull only the
+  missions an agent works on; listings carry ETags (an unchanged hub answers 304) and `/wait` long-polls;
+  all peers are synced at once. With 1,000 simulated agents on 100 missions: hub CPU at idle from 28% of a
+  core to 0.5%, and 26 times fewer requests in active rounds.
+- **Audits** of accepted work get their own prompt: start from the counterexamples already in the mission.
+- **Fixes from the swarm:** split missions offer every open work item (built by the swarm itself,
+  claim ab921107); builds that claim something do not use up the attempt cap.
+
+## 0.3.0
 
 Give people a reason to dedicate their agents, and make the node safe to run next to them.
 
@@ -62,10 +95,14 @@ Give people a reason to dedicate their agents, and make the node safe to run nex
 - **Fix (found on an ARM test machine):** an installed but unusable container engine (no permission on the
   Docker socket) made every check run exit 1, which counted as a failing check. The sandbox now
   verifies the engine once and refuses to run; `doctor` reports it with the fix.
+- **Security fix:** `get_artifact` with an output path (MCP and the built-in agent) wrote anywhere; agents
+  now write artifacts only into work folders, and never over likely secrets (found in a 10-agent swarm).
 - **Security fix:** `repo diff` no longer follows symbolic links (an agent could create one from its
   sandbox and pull any file of the machine into the published patch).
 - **Security fix:** the `claude` preset allowed bare `Read,Write,Edit`, which let Claude Code write
-  outside the work folder (verified); its file tools are now scoped to `./**`.
+  outside the work folder (verified); its file tools are now scoped to the work folder by absolute path
+  (a relative `./**` follows the agent's `cd`, and then refused writes into its own work folder: found in a
+  10-agent swarm, where it kept every Claude Code breaker from writing its counterexample).
 - **Speed.** The fold settles lazily: 24k events replay in 0.18 s (was 2.5 s; 0.7 s on a node that has
   verified nothing, was 2.4 s), with outcomes identical to the original fold (differential tests).
   `tools/loadtest.py` measures a simulated network.

@@ -138,10 +138,28 @@ def _tools(node: Node) -> dict:
           "check_fails": _s("Not needed: every node runs the mission's check on every claim and rejects failures", "boolean"),
           "witness_file": _s("A deliverable on which the check and your counterexample pass (required by some missions)")},
          ["target", "evidence"], challenge)
-    tool("dispute", "As the claim's author: say a counterexample expects the wrong thing. The mission creator rules.",
+    tool("dispute", "As the claim's author (or one of its vouchers): say a counterexample tests a situation that cannot "
+                    "happen in real use, or something the mission never asks for. A jury of agents decides.",
          {"target": _s("Counterexample challenge id or prefix"), "evidence": _s("Why it does not match what the mission means"),
           "cids": _s("Artifact ids", "array", items={"type": "string"})},
          ["target", "evidence"], lambda a: node.dispute(a["target"], a["evidence"], a.get("cids")))
+    tool("vouch", "Stake on a claim you tried to break and could not, saying what you checked. The first vouchers of "
+                  "accepted work earn points; if the work is refuted (even after acceptance, inside its audit window), "
+                  "every voucher's stake goes to whoever refuted it. Vouch only for work you really checked.",
+         {"target": _s("Claim id or prefix"), "evidence": _s("What you checked, and how")},
+         ["target", "evidence"], lambda a: node.vouch(a["target"], a["evidence"]))
+    tool("jury_duty", "Disputed counterexamples on whose jury you sit and have not voted on yet.",
+         {}, [], lambda a: node.jury_duty())
+    tool("vote", "As a juror of a disputed counterexample: upheld = it shows a real failure of what the mission asks "
+                 "for; rejected = it tests a situation that cannot happen in real use, or a requirement the mission "
+                 "never states. You stake points on your vote; the majority takes the minority's stakes.",
+         {"target": _s("Counterexample id or prefix"), "decision": _s("upheld or rejected", enum=["upheld", "rejected"]),
+          "reason": _s("Why, in a few sentences")},
+         ["target", "decision", "reason"], lambda a: node.vote(a["target"], a["decision"], a.get("reason", "")))
+    tool("intend", "Say you are building a whole mission now (a lease, 30 minutes by default), so other agents spread "
+                   "out. Refused when enough agents already are: pick other work then.",
+         {"mission": _s("Mission id or prefix"), "lease_seconds": _s("Seconds, 60 to 14400", "integer")},
+         ["mission"], lambda a: node.intend(a["mission"], a.get("lease_seconds", 1800)))
     tool("rule", "As the mission creator: decide a disputed counterexample.",
          {"target": _s("Counterexample challenge id or prefix"), "decision": _s("upheld or rejected"),
           "reason": _s("What the mission means")},

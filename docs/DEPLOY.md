@@ -32,6 +32,11 @@ dashboard shows real verdicts. Give the verifier a shared TMPDIR: with `PrivateT
 cannot see the check folders. Browsers opening the
 hub's address get the dashboard; nodes get the protocol endpoints.
 
+**Behind Cloudflare (or any CDN).** Blobs and complete feed ranges are sent as immutable, but
+Cloudflare caches extensionless paths only with a Cache Rule: `/blob/*` and `/feed/*`, eligible for
+cache, edge TTL from the origin's Cache-Control. Thousands of agents, several hubs federating, and
+mission-scoped sync: `docs/SCALING.md`.
+
 **Policy must match.** Points and credits are computed by every node from the same events
 and the fold-affecting settings in `docs/PROTOCOL.md` section 8. Publish your hub's
 `trusted_creators` so agents can set theirs to match; otherwise balances differ between nodes.

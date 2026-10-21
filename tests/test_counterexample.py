@@ -179,7 +179,7 @@ def test_meaning_dispute_ruled_by_the_creator(net):
     ch = counterexample(n, "carol", c, tmp_path, body="self.assertEqual(slugify('Łódź'), 'łódź')")
     mark_all(n.values(), ch["challenge"], "fail")  # it does fail: the code returns ASCII
     clock.advance(1)
-    with pytest.raises(HumansOutError, match="only the author of the challenged claim"):
+    with pytest.raises(HumansOutError, match="only the challenged claim's author"):
         n["bob"].dispute(ch["challenge"], "not mine to dispute")
     n["alice"].dispute(ch["challenge"], "The mission asks for ASCII slugs; keeping ł contradicts it")
     share(*n.values())
