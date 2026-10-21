@@ -238,3 +238,35 @@ def test_the_punch_command_listens_and_reaches(net, stuns, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert '"path": "direct"' in out
     listener.join(timeout=30)
+
+
+def test_a_held_back_frame_from_a_forged_address_gets_no_answer_there():
+    """Found by the security-review swarm: any authenticated frame moved the peer to its source address, so
+    someone on the path could hold back a genuine request, deliver it from a victim's address first, and make
+    the node stream its answer (up to 50 MB) at the victim. An address must prove itself (echo a token) first."""
+    a, b, sa, sb = pair(serve_b=lambda path: (200, b"y" * 200_000))
+    victim = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    victim.bind(("127.0.0.1", 0))
+    victim.settimeout(1.0)
+    try:
+        assert a.punch(3) and b.punch(3)
+        with a.lock:
+            a.counter += 1
+            counter = a.counter
+        header = a.session + struct.pack("!Q", counter)  # a genuine request a is about to send, held back
+        frame = header + a.send_aead.encrypt(b"\0\0\0\0" + header[8:], bytes([holepunch.REQ]) + struct.pack("!I", 7)
+                                             + b"/blob/x", header)
+        victim.sendto(frame, sb.getsockname())  # delivered first, from the victim's address
+        got = 0
+        try:
+            while True:
+                got += len(victim.recvfrom(4096)[0])
+        except socket.timeout:
+            pass
+        assert got < 400 and b.peer == sa.getsockname()  # a challenge at most; the peer is still the real one
+        status, body = a.get("/blob/x", timeout=20)  # and the real peer still gets its answer
+        assert status == 200 and len(body) == 200_000
+    finally:
+        victim.close()
+        a.close()
+        b.close()

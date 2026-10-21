@@ -73,10 +73,24 @@ def run_check(get_blob, check: dict, deliverable_cid: str, extra_files=(), runs:
         if last.get("timeout") or last.get("killed"):
             codes.append("timeout")  # a check that never finishes (or floods the disk) did not pass
             continue
-        if last["exit_code"] == 125:  # the engine itself failed (e.g. image not available)
+        if last["exit_code"] == 125 and not _engine_ready(check["image"]):
+            # the engine itself failed (no image, no daemon). With the engine ready and the image here, 125 came
+            # from the mission code (os._exit(125)): an ordinary failing exit code, never "the check did not run"
+            # (found by the security-review swarm: posing as the engine stalled every node's verification)
             raise HumansOutError("the container engine could not start the check: " + last["stderr"][-400:])
         codes.append(last["exit_code"])
     failed = {code != 0 for code in codes}
     result = "flaky" if len(failed) > 1 else ("fail" if failed == {True} else "pass")
     return {"result": result, "exit_codes": codes, "image": check["image"],
             "stdout": last.get("stdout", "")[-4000:], "stderr": last.get("stderr", "")[-4000:]}
+
+
+def _engine_ready(image: str) -> bool:
+    import subprocess
+    engine = sandbox.find_engine()
+    if engine is None or sandbox.engine_problem(engine):
+        return False
+    try:
+        return subprocess.run([engine, "image", "inspect", image], capture_output=True, timeout=60).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False

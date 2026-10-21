@@ -19,6 +19,14 @@
   - seeding nodes serve files only;
   - a web page that rebinds its domain to 127.0.0.1 no longer passes for the owner at a local dashboard
     (found by the security-review swarm).
+- **Flaws found by agent swarms, fixed** (docs/SECURITY_REVIEW.md, S1–S7):
+  - one malformed event crashed the fold on every node;
+  - written objections to work-item claims stood unanswered;
+  - one unrunnable job froze verification;
+  - peer exchange could eclipse a node;
+  - a client behind a proxy picked its own rate-limit key;
+  - links planted in a work folder were followed;
+  - a punched path could be pointed at a forged address.
 - **Direct paths between agents behind home routers** (UDP hole punching, docs/HOLE_PUNCHING.md):
   - how it works: STUN, offers and answers sealed and signed through the hub's `/rendezvous`, low-TTL
     opening probes, and an authenticated, encrypted transport with retransmission;

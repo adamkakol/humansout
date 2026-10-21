@@ -334,3 +334,38 @@ def test_a_rebound_web_page_is_never_the_owner(tmp_path):
         assert get(f"{url}/api/turns", {"Host": "attacker.example", "CF-Connecting-IP": "203.0.113.9"})[0] == 403
     finally:
         srv.shutdown()
+
+
+def test_a_client_behind_a_proxy_cannot_pick_its_own_rate_limit_key(hub):
+    """Found by the security-review swarm: behind nginx the hub keyed limits on the first X-Forwarded-For entry,
+    which the client writes; nginx appends the address it saw at the end."""
+    node, url = hub(push_rate_per_min=3)
+    codes = []
+    for i in range(6):
+        req = urllib.request.Request(f"{url}/feed/{'a' * 64}", data=b"{}\n", method="POST",
+                                     headers={"X-Forwarded-For": f"198.51.100.{i}, 203.0.113.7"})
+        try:
+            codes.append(urllib.request.urlopen(req, timeout=10).status)
+        except urllib.error.HTTPError as e:
+            codes.append(e.code)
+    assert codes[3:] == [429, 429, 429]
+
+
+def test_peer_exchange_cannot_eclipse_the_owners_hubs(tmp_path, monkeypatch):
+    """Found by the security-review swarm (and its objection): learned peers pushed the owner's hubs out of the
+    200-place list, and sync asked only the first 25 in the order added, so a hub added later was never reached."""
+    from humansout import net, store as store_mod
+    monkeypatch.setattr(store_mod, "public_host", lambda url: True)  # the attacker's names resolve publicly
+    node = Node(tmp_path / "n")
+    node.store.add_peer("https://my-hub.example.org")
+    for i in range(300):  # a hostile peer lists public names, round after round
+        node.store.add_peer(f"https://h{i}.example.net", learned=True)
+    node.store.add_peer("https://second-hub.example.org")  # the owner adds another hub afterwards
+    peers = node.store.peers()
+    assert {"https://my-hub.example.org", "https://second-hub.example.org"} <= set(peers)
+    assert len(peers) <= 200 and len(node.store._learned()) <= 100
+    asked = []
+    monkeypatch.setattr(net, "_survey", lambda cache, peer, scope: asked.append(peer) or {})
+    monkeypatch.setattr(net, "_wanted_blobs", lambda n: set())
+    net.sync(node)
+    assert asked[:2] == ["https://my-hub.example.org", "https://second-hub.example.org"]

@@ -397,6 +397,14 @@ def _graph(snap: dict, max_missions: int = 40, max_agents: int = 160) -> dict:
 
 
 def _summary(e: dict, world) -> str:
+    """One line about an event. Its body is whatever its author signed: anything unforeseen reads as its type."""
+    try:
+        return str(_summary_of(e, world))
+    except (TypeError, KeyError, ValueError, AttributeError, IndexError):
+        return f"{e['type']} (malformed)"
+
+
+def _summary_of(e: dict, world) -> str:
     b = e["body"]
     t = e["type"]
     if t == "mission.announce":

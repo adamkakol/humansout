@@ -22,6 +22,8 @@ other through hubs, as before.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -260,6 +262,7 @@ class Link:
         self.answering = threading.BoundedSemaphore(MAX_ANSWERING)
         self.stats = {"sent": 0, "received": 0, "resent": 0, "dropped": 0}
         self.last_sent = time.monotonic()
+        self.secret = os.urandom(32)  # proves addresses: a token per address that only a live receiver can echo
         threading.Thread(target=self._receive, daemon=True).start()
         threading.Thread(target=self._keepalive, daemon=True).start()
 
@@ -268,7 +271,10 @@ class Link:
         a punch from many sockets it tells the other side which socket is the one that stayed open."""
         while not self.closed.wait(KEEPALIVE_S / 2):
             if self.connected.is_set() and self.peer and time.monotonic() - self.last_sent >= KEEPALIVE_S:
-                self._send(HELLO, os.urandom(8))
+                self._send(HELLO, self._token(self.peer))
+
+    def _token(self, addr) -> bytes:
+        return hmac.new(self.secret, f"{addr[0]}|{addr[1]}".encode(), hashlib.sha256).digest()[:8]
 
     # framing: session id (8) | counter (8) | ChaCha20-Poly1305(type + payload), the header as associated data
     def _send(self, kind: int, payload: bytes = b"", to: tuple[str, int] | None = None, via=None) -> None:
@@ -329,14 +335,24 @@ class Link:
             self.stats["dropped"] += 1  # not of this session: never answered (nothing to reflect)
             return
         self.stats["received"] += 1
-        self.last_heard = time.monotonic()
-        if self.peer != addr or self.sock is not sock:
-            # the socket and address its packets really come through (a NAT may have changed the port)
-            self.peer, self.sock = addr, sock
-        self.connected.set()
         kind, payload = frame[0], frame[1:]
+        if kind == HELLO_ACK and hmac.compare_digest(payload[:8], self._token(addr)):
+            # the address proved it is live: it read the token this side sent to that very address
+            if self.peer != addr or self.sock is not sock:
+                self.peer, self.sock = addr, sock  # first contact, or a NAT that changed the port
+            self.connected.set()
+        if addr != self.peer or sock is not self.sock:
+            # an authenticated frame from an address that has not proved itself (a frame held back on the path and
+            # replayed from a forged source, found by the security-review swarm): never processed, never answered
+            # with data; it gets only a small challenge (and the echo a real peer needs to prove us in turn)
+            self.stats["challenged"] = self.stats.get("challenged", 0) + 1
+            if kind == HELLO:
+                self._send(HELLO_ACK, payload[:8], to=addr, via=sock)
+            self._send(HELLO, self._token(addr), to=addr, via=sock)
+            return
+        self.last_heard = time.monotonic()
         if kind == HELLO:
-            self._send(HELLO_ACK, to=addr)
+            self._send(HELLO_ACK, payload[:8], to=addr)
         elif kind == REQ and len(payload) >= 4 and self.answering.acquire(blocking=False):
             threading.Thread(target=self._answer, args=(payload,), daemon=True).start()  # else: it asks again
         elif kind == NACK and len(payload) >= 4:
@@ -381,12 +397,12 @@ class Link:
         def opening():
             for sock in self.socks:
                 for address in self.candidates:
-                    self._send(HELLO, os.urandom(8), to=address, via=sock)
+                    self._send(HELLO, self._token(address), to=address, via=sock)
             # the other side's router gives every destination a new random port: open SPRAY_PORTS of them here,
             # so that one of its many sockets' ports is likely among them (the birthday paradox)
             for host in self.spray:
                 for port in random.sample(range(1024, 65536), SPRAY_PORTS):
-                    self._send(HELLO, b"", to=(host, port))
+                    self._send(HELLO, self._token((host, port)), to=(host, port))
         for ttl in open_ttls:
             self._low_ttl(opening, ttl)
         self.connected.wait(OPEN_WAIT_S)  # the other side opens its mapping meanwhile
@@ -394,11 +410,11 @@ class Link:
         while time.monotonic() < deadline and not self.connected.is_set():
             for sock in self.socks:
                 for address in self.candidates:
-                    self._send(HELLO, os.urandom(8), to=address, via=sock)
+                    self._send(HELLO, self._token(address), to=address, via=sock)
             self.connected.wait(0.3 if len(self.socks) > 1 else 0.2)
         if self.connected.is_set():
-            for _ in range(3):  # make sure the other side hears us too
-                self._send(HELLO)
+            for _ in range(3):  # make sure the other side can prove us too
+                self._send(HELLO, self._token(self.peer))
             for sock in self.socks:  # keep only the socket that got through
                 if sock is not self.sock:
                     sock.close()

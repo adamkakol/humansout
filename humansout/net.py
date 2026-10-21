@@ -186,7 +186,9 @@ def _client_key(handler) -> str:
     except ValueError:
         loopback = False
     if loopback:
-        forwarded = handler.headers.get("CF-Connecting-IP") or (handler.headers.get("X-Forwarded-For") or "").split(",")[0]
+        # the LAST X-Forwarded-For entry is the one the local proxy appended (nginx's $proxy_add_x_forwarded_for);
+        # the first is whatever the client sent, a fresh rate-limit key per request (found by the review swarm)
+        forwarded = handler.headers.get("CF-Connecting-IP") or (handler.headers.get("X-Forwarded-For") or "").split(",")[-1]
         if forwarded.strip():
             return forwarded.strip()[:64]
     return peer
@@ -915,7 +917,11 @@ def sync(node, peers: list[str] | None = None, missions: list[str] | None = None
     store = node.store
     for p in peers or []:
         store.add_peer(p)
-    targets = _dedupe(peers or store.peers())[:int(store.config().get("max_peers_per_sync", MAX_PEERS_PER_SYNC))]
+    listed = _dedupe(peers or store.peers())
+    if not peers:  # the owner's peers first, then learned ones: peer exchange cannot crowd the owner's hubs out
+        learned = set(store._learned())
+        listed = sorted(listed, key=lambda p: p in learned)
+    targets = listed[:int(store.config().get("max_peers_per_sync", MAX_PEERS_PER_SYNC))]
     scope = sync_scope(node, missions, topics)
     workers = max(1, int(workers or store.config().get("sync_workers", SYNC_WORKERS)))
     cache = _PeerCache(store, conditional)

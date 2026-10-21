@@ -39,6 +39,7 @@ CID_RE = re.compile(r"^sha256-[0-9a-f]{64}$")
 EVENT_FIELDS = ("v", "author", "seq", "prev", "ts", "type", "body")
 MAX_EVENT_BYTES = 64 * 1024        # a peer cannot fill a node's disk with a few huge events
 MAX_EVENTS_PER_INGEST = 10_000     # nor with an endless feed in one sync
+MAX_PEERS, MAX_LEARNED = 200, 100  # known peers, of which learned by peer exchange
 
 DEFAULT_CONFIG = {
     # Reputation as stake (section 9.7 of the concept doc)
@@ -223,12 +224,20 @@ class Store:
                 if not learned and url in self._learned():  # the owner adds it: trusted from now on
                     (self.home / "learned_peers.json").write_text(json.dumps([u for u in self._learned() if u != url]))
                 return False
+            # Peer exchange may never push out the owner's own peers (found by the security-review swarm: a hostile
+            # peer listing 200 public names eclipsed the owner's hub). Learned peers hold at most MAX_LEARNED places
+            # and give way first, oldest first; a list full of the owner's peers takes no learned one.
+            learned_now = [u for u in self._learned() if u in peers]
+            if learned and len(peers) >= MAX_PEERS and not learned_now:
+                return False
+            while learned_now and (len(peers) >= MAX_PEERS or (learned and len(learned_now) >= MAX_LEARNED)):
+                peers.remove(learned_now.pop(0))
+            while len(peers) >= MAX_PEERS:
+                peers.pop(0)  # only the owner's peers left: the oldest of them gives way to the one it adds
             peers.append(url)
-            (self.home / "peers.json").write_text(json.dumps(peers[-200:], indent=2))
-            if learned:  # remembered as learned: reached only at public addresses (net.urlopen public_only)
-                path = self.home / "learned_peers.json"
-                known = [u for u in self._learned() if u in peers]
-                path.write_text(json.dumps((known + [url])[-200:], indent=2))
+            (self.home / "peers.json").write_text(json.dumps(peers, indent=2))
+            # remembered as learned: reached only at public addresses (net.urlopen public_only), synced after the owner's
+            (self.home / "learned_peers.json").write_text(json.dumps(learned_now + ([url] if learned else []), indent=2))
         return True
 
     def _learned(self) -> list[str]:

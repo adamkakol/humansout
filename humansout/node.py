@@ -22,6 +22,9 @@ from .store import CID_RE, PUB_RE, Store
 from .verify import LABELS, run_check, verification_key
 
 
+UNSERVED_GRACE_MS = 2 * 3600 * 1000  # a counterexample's files unavailable this long: recorded as invalid
+
+
 def default_home() -> Path:
     return Path(os.environ.get("HUMANSOUT_HOME", "~/.humansout")).expanduser()
 
@@ -72,7 +75,30 @@ class Node:
         if self.restrict_paths and not any(real == r or r in real.parents for r in self.allowed_roots()):
             raise HumansOutError(f"refusing to {purpose} {path}: agents may only use files under "
                                  f"{', '.join(str(r) for r in self.allowed_roots())} (config publish_roots)")
+        if self.restrict_paths:
+            self._no_links_below_a_root(Path(path).expanduser(), purpose)
         return real
+
+    def _no_links_below_a_root(self, raw: Path, purpose: str) -> None:
+        """Agent-facing paths: no `..`, and no symbolic link anywhere below the work root. Mission code runs in a
+        sandbox that mounts the work folder, so it can plant links there; through one, an agent would publish or
+        overwrite another mission's files, also with `..` after the link (found by the security-review swarm)."""
+        if ".." in raw.parts:
+            raise HumansOutError(f"refusing to {purpose} {raw}: use a path without '..'")
+        lexical = raw if raw.is_absolute() else Path.cwd() / raw
+        roots = [self.home / "work", *(Path(r).expanduser() for r in self.store.config().get("publish_roots", []))]
+        roots = [r.absolute() for r in roots] + self.allowed_roots()
+        for root in roots:
+            if lexical != root and root not in lexical.parents:
+                continue
+            node = lexical
+            while node != root:
+                if node.is_symlink():
+                    raise HumansOutError(f"refusing to {purpose} {raw}: {node.name} is a symbolic link (mission code "
+                                         "can plant links in a work folder)")
+                node = node.parent
+            return
+        raise HumansOutError(f"refusing to {purpose} {raw}: it reaches the work folder only through a link")
 
     def allowed_image(self, image: str) -> str:
         """Checks name a container image; only images this node trusts are ever pulled or run."""
@@ -673,26 +699,51 @@ class Node:
             except HumansOutError as e:
                 skipped.append({"challenge": job.get("challenge"), "claim": job["claim"], "reason": str(e)})
                 continue
-            if job.get("kind") == "check":   # the claim's own check: decides whether it can be accepted
-                res = self._run_and_record(check, job["deliverable"], [], runs, get_blob)
-                results.append({"claim": job["claim"], "check": "passes" if res["result"] == "pass" else res["result"],
-                                "exit_codes": res["exit_codes"], "output_tail": (res["stdout"] + res["stderr"])[-1500:]})
+            if job.get("kind") != "check":
+                # a counterexample whose files nobody serves can never be run: after a grace period it is
+                # recorded as invalid (not reproduced), so it cannot freeze the claim it objects to for ever
+                own = [f["cid"] for f in job["files"]] + ([job["witness"]] if job.get("witness") else [])
+                if any(get_blob(c) is None for c in own):
+                    age = self.clock() - world.items[job["challenge"]]["ts"]
+                    if age >= UNSERVED_GRACE_MS:
+                        self.store.save_verification(verification_key(check, job["deliverable"], job["files"]), {
+                            "result": "invalid", "reason": "the counterexample's files are not served",
+                            "verified_ms": self.clock()})
+                        results.append({"challenge": job["challenge"], "claim": job["claim"],
+                                        "counterexample": "invalid (its files are not served)"})
+                    else:
+                        skipped.append({"challenge": job["challenge"], "claim": job["claim"],
+                                        "reason": "its files are not available yet"})
+                    continue
+            try:
+                outcome = self._verify_job(job, check, runs, get_blob)
+            except HumansOutError as e:  # one job that cannot run never stops the others (security-review swarm)
+                skipped.append({"challenge": job.get("challenge"), "claim": job["claim"], "reason": str(e)[:300]})
                 continue
-            res = self._run_and_record(check, job["deliverable"], job["files"], runs, get_blob)
-            wres = (self._run_and_record(check, job["witness"], job["files"], runs, get_blob)
-                    if job.get("witness") else None)
-            from .state import combine
-            verdict = combine(res["result"], wres["result"] if wres else None, bool(job.get("witness")))
-            results.append({"challenge": job["challenge"], "claim": job["claim"],
-                            "counterexample": LABELS[verdict], "exit_codes": res["exit_codes"],
-                            "output_tail": (res["stdout"] + res["stderr"])[-1500:],
-                            **({"witness_output_tail": (wres["stdout"] + wres["stderr"])[-600:]} if wres else {})})
+            results.append(outcome)
         after = self.world()
         for r in results:
-            claim = after.item_view(r["claim"])
-            r["claim_status"] = claim["status"]
-            r["claim_signal"] = claim.get("verification_status")
+            if "claim" in r and r["claim"] in after.items:
+                claim = after.item_view(r["claim"])
+                r["claim_status"] = claim["status"]
+                r["claim_signal"] = claim.get("verification_status")
         return {"verified": results, "remaining": len(after.pending_verifications()), "skipped": skipped}
+
+    def _verify_job(self, job: dict, check: dict, runs: int, get_blob) -> dict:
+        """Run one pending job (a claim's own check, or a counterexample with its witness) and record it."""
+        if job.get("kind") == "check":   # the claim's own check: decides whether it can be accepted
+            res = self._run_and_record(check, job["deliverable"], [], runs, get_blob)
+            return {"claim": job["claim"], "check": "passes" if res["result"] == "pass" else res["result"],
+                    "exit_codes": res["exit_codes"], "output_tail": (res["stdout"] + res["stderr"])[-1500:]}
+        res = self._run_and_record(check, job["deliverable"], job["files"], runs, get_blob)
+        wres = (self._run_and_record(check, job["witness"], job["files"], runs, get_blob)
+                if job.get("witness") else None)
+        from .state import combine
+        verdict = combine(res["result"], wres["result"] if wres else None, bool(job.get("witness")))
+        return {"challenge": job["challenge"], "claim": job["claim"],
+                "counterexample": LABELS[verdict], "exit_codes": res["exit_codes"],
+                "output_tail": (res["stdout"] + res["stderr"])[-1500:],
+                **({"witness_output_tail": (wres["stdout"] + wres["stderr"])[-600:]} if wres else {})}
 
     # ---- network -------------------------------------------------------------------
     def publish(self) -> dict:

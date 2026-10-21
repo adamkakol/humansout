@@ -289,7 +289,15 @@ class World:
         }.get(e["type"])
         if handler is None:
             return self._reject(e, "unknown event type")
-        handler(e)
+        for key in ("mission_id", "target", "work_id"):  # ids are looked up as keys: a list there crashed every node
+            if key in e["body"] and not isinstance(e["body"][key], str):
+                return self._reject(e, f"{key} must be a string")
+        try:
+            handler(e)
+        except (TypeError, KeyError, ValueError, AttributeError, IndexError) as error:
+            # a signed event can carry any JSON: whatever a handler did not foresee is ignored the same way on every
+            # node, never allowed to stop the fold (one such event would take the whole network's view down)
+            return self._reject(e, f"malformed event ({type(error).__name__})")
         if e["type"] in ("dispute", "ruling", "vote"):
             self._dirty = True  # a ruling or a jury majority can decide a counterexample at once
         elif e["type"] in ("claim_done", "challenge") and e["id"] in self.items:
@@ -610,8 +618,9 @@ class World:
             return self._reject(e, "challenge needs counter-evidence (text or cids)")
         if kind not in ("evidence", "counterexample"):
             return self._reject(e, "unknown challenge kind")
-        if (kind == "evidence" and mission["check"] and target["kind"] == "claim" and target["target"] == "mission"):
-            # an unanswered written objection would refute work that passes every test: objections here must run
+        if kind == "evidence" and mission["check"] and target["kind"] == "claim":
+            # an unanswered written objection would refute work that passes every test: objections here must run,
+            # to a claim on the whole mission or on one work item alike (found by the security-review swarm)
             return self._reject(e, "this mission has a runnable check: object with a counterexample (a test that "
                                    "fails on the deliverable), not with text")
         extra = {}

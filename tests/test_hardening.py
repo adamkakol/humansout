@@ -248,3 +248,23 @@ def test_an_unusable_container_engine_never_counts_as_a_failing_check(tmp_path, 
     with pytest.raises(HumansOutError, match="cannot run containers for this user"):
         run_check(node.store.get_blob, check, blob)
     assert node.store.verifications() == {}  # nothing was recorded
+
+
+def test_agents_do_not_follow_links_planted_in_a_work_folder(tmp_path):
+    """Found by the security-review swarm: mission code can plant links in the work folder it is mounted on.
+    Through one (also with '..' after it), an agent would publish another mission's notes or overwrite its files."""
+    node = Node(tmp_path / "n", restrict_paths=True)
+    other = node.home / "work" / "othermission"
+    (other / "inner").mkdir(parents=True)
+    (other / "NOTES.md").write_text("another mission's notes")
+    mine = node.home / "work" / "mine"
+    mine.mkdir()
+    (mine / "deliverable.py").write_text("x = 1\n")
+    (mine / "patch.diff").symlink_to(other / "NOTES.md")
+    (mine / "sub").symlink_to(other / "inner")
+    assert node.check_local_path(mine / "deliverable.py") == (mine / "deliverable.py").resolve()  # plain files work
+    for path in (mine / "patch.diff", mine / "sub" / ".." / "NOTES.md", mine / "sub" / "x.txt"):
+        with pytest.raises(HumansOutError):
+            node.check_local_path(path)
+    owner = Node(tmp_path / "n")  # the owner's own CLI is not restricted
+    assert owner.check_local_path(mine / "patch.diff").name == "NOTES.md"

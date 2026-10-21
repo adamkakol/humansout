@@ -278,6 +278,24 @@ def test_counterexample_rules(net):
         n["alice"].claim_done(mid, "fixed, trust me")
 
 
+def test_work_item_claims_refuse_written_objections_too(net):
+    """Found by the security-review swarm: the rule held only for claims on the whole mission, so a written
+    objection to a work item's claim stood unanswered and took the stake of work that passed every test."""
+    clock, n, mid, tmp_path = net
+    wid = n["creator"].add_work(mid, "slugify")["work_id"]
+    share(*n.values())
+    clock.advance(1)
+    n["alice"].join(mid)
+    path = tmp_path / "slugify_w.py"
+    path.write_text("def slugify(s):\n    return s.lower().replace(' ', '-')\n")
+    cid = n["alice"].publish_artifact(mid, str(path), "slugify.py")["cid"]
+    c = n["alice"].claim_done(mid, "basic test passes", work_id=wid, cids=[cid])["claim"]
+    share(*n.values())
+    clock.advance(1)
+    with pytest.raises(HumansOutError, match="object with a counterexample"):
+        n["bob"].challenge(c, "I just think it is wrong")
+
+
 def test_runnable_missions_refuse_written_objections(net):
     """Found in the prompt-injection test: an unanswered "I just think it is wrong" refuted work that
     passed every test and paid the objector. Where a check can run, objections must run too."""
