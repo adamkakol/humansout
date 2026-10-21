@@ -729,6 +729,25 @@ class Node:
                 r["claim_signal"] = claim.get("verification_status")
         return {"verified": results, "remaining": len(after.pending_verifications()), "skipped": skipped}
 
+    def attest(self) -> dict:
+        """Publish this node's check results that it has not attested yet, for nodes that trust it as a verifier
+        (config trusted_verifiers): they then follow missions without re-running every check themselves."""
+        from .state import ATTEST_RESULTS, MAX_ATTESTED
+        path = self.home / "attested.json"
+        try:
+            done = set(json.loads(path.read_text()))
+        except (OSError, ValueError):
+            done = set()
+        fresh = {k: v["result"] for k, v in sorted(self.store.verifications().items())
+                 if isinstance(v, dict) and v.get("result") in ATTEST_RESULTS and k not in done}
+        keys = list(fresh)
+        for i in range(0, len(keys), MAX_ATTESTED):
+            chunk = {k: fresh[k] for k in keys[i:i + MAX_ATTESTED]}
+            self.store.append_own(self.identity, "attest", {"results": chunk}, self.clock())
+            done.update(chunk)
+        path.write_text(json.dumps(sorted(done)))
+        return {"attested": len(keys)}
+
     def _verify_job(self, job: dict, check: dict, runs: int, get_blob) -> dict:
         """Run one pending job (a claim's own check, or a counterexample with its witness) and record it."""
         if job.get("kind") == "check":   # the claim's own check: decides whether it can be accepted

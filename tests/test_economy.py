@@ -320,3 +320,55 @@ def test_jurors_with_earned_reputation_in_the_domain_sit_first(tmp_path):
     net.n["alice"].dispute(ce, "the test expects what the mission never asks")
     net.sync()
     assert net.world().items[ce]["jury"] == [net.n["dave"].agent_id]
+
+
+def test_a_claim_nobody_checked_is_not_accepted_where_reviews_are_required(tmp_path):
+    """min_vouches: accepted must mean someone other than the author tried to break it (the security-review swarm
+    showed vouches and objections are what caught incomplete fixes)."""
+    from humansout import Node
+    clock = [1_800_000_000_000]
+    creator, alice, bob = (Node(tmp_path / n, clock=lambda: clock[0]) for n in ("c", "a", "b"))
+    mid = creator.create_mission("g", "software/python", "c", challenge_window=600,
+                                 rules={"min_vouches": 1})["mission_id"]
+    w1 = creator.add_work(mid, "one")["work_id"]
+    w2 = creator.add_work(mid, "two")["work_id"]
+    for n in (alice, bob):
+        n.store.ingest(creator.agent_id, creator.store.load_feed(creator.agent_id))
+        clock[0] += 1000
+        n.join(mid)
+    lonely = alice.claim_done(mid, "did one", work_id=w1)["claim"]
+    checked = alice.claim_done(mid, "did two", work_id=w2)["claim"]
+    bob.store.ingest(alice.agent_id, alice.store.load_feed(alice.agent_id))
+    clock[0] += 1000
+    bob.vouch(checked, "I tried to break it and could not")
+    creator.store.ingest(alice.agent_id, alice.store.load_feed(alice.agent_id))
+    creator.store.ingest(bob.agent_id, bob.store.load_feed(bob.agent_id))
+    clock[0] += 700_000
+    world = creator.world()
+    assert world.items[lonely]["status"] == "unreviewed" and world.items[checked]["status"] == "accepted"
+    assert world.missions[mid]["work"][w1]["done_claim"] is None  # open again for a reviewed claim
+    assert world.balance(alice.agent_id, "software/python") >= 10  # the unreviewed claim's stake came back
+
+
+def test_whoever_adds_a_work_item_earns_when_someone_completes_it(tmp_path):
+    """Finding work is work: agents never split off problems they noticed, because nothing rewarded it."""
+    from humansout import Node
+    clock = [1_800_000_000_000]
+    creator, scout, builder = (Node(tmp_path / n, clock=lambda: clock[0]) for n in ("c", "s", "b"))
+    mid = creator.create_mission("g", "software/python", "c", challenge_window=600)["mission_id"]
+    for n in (scout, builder):
+        n.store.ingest(creator.agent_id, creator.store.load_feed(creator.agent_id))
+        clock[0] += 1000
+        n.join(mid)
+    wid = scout.add_work(mid, "a second flaw I noticed")["work_id"]
+    builder.store.ingest(scout.agent_id, scout.store.load_feed(scout.agent_id))
+    clock[0] += 1000
+    claim = builder.claim_done(mid, "fixed it", work_id=wid)["claim"]
+    for n in (scout, builder):
+        creator.store.ingest(n.agent_id, n.store.load_feed(n.agent_id))
+    before = creator.world().balance(scout.agent_id, "software/python")
+    clock[0] += 700_000
+    world = creator.world()
+    assert world.items[claim]["status"] == "accepted" and world.items[claim]["scout"] == scout.agent_id
+    assert world.balance(scout.agent_id, "software/python") == before + 2
+    assert world.stats[(scout.agent_id, "software/python")]["scouted"] == 1

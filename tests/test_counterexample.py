@@ -407,3 +407,54 @@ def test_work_item_claims_in_runnable_missions_need_a_deliverable(net):
     n["alice"].join(mid)
     with pytest.raises(HumansOutError, match="name your deliverable"):
         n["alice"].claim_done(mid, "done", work_id=wid)
+
+
+def test_a_counterexample_whose_files_nobody_serves_cannot_freeze_the_claim(net):
+    """Found by two Haiku agents in the security-review swarm: an objection whose test file is never served stayed
+    unverified for ever, so the honest claim it objects to never settled and its stake stayed locked."""
+    from humansout.node import UNSERVED_GRACE_MS
+    clock, n, mid, tmp_path = net
+    c = claim(n, mid, tmp_path)
+    clock.advance(1)
+    ce = counterexample(n, "bob", c, tmp_path)["challenge"]
+    creator = n["creator"]
+    files = creator.world().items[ce]["files"]
+    assert files and not any(creator.store.has_blob(f["cid"]) for f in files)  # events travel, the file does not
+    out = creator.verify()
+    assert any(s.get("challenge") == ce and "not available yet" in s["reason"] for s in out["skipped"])
+    clock.advance(UNSERVED_GRACE_MS // 1000 + 1)
+    out = creator.verify()
+    assert any(r.get("challenge") == ce and "invalid" in r["counterexample"] for r in out["verified"])
+    clock.advance(300)
+    assert creator.world().items[c]["status"] == "accepted"
+
+
+def test_light_nodes_take_trusted_verifiers_results_and_never_guess(net):
+    """Verification at scale: every node re-running every check does not scale to thousands of claims. A node that
+    trusts verifiers (trusted_verifiers) takes their attested results for checks it did not run; its own runs
+    come first, attestations by others are ignored, and where trusted verifiers disagree it takes nothing."""
+    clock, n, mid, tmp_path = net
+    path = tmp_path / "slugify_light.py"
+    path.write_text("def slugify(s):\n    return s.lower().replace(' ', '-')\n")
+    n["alice"].join(mid)
+    cid = n["alice"].publish_artifact(mid, str(path), "slugify.py")["cid"]
+    c = n["alice"].claim_done(mid, "basic test passes", cids=[cid])["claim"]
+    share(*n.values())
+    key = n["creator"].world().items[c]["check_key"]
+    verifier, rogue, light = n["carol"], n["bob"], Node(tmp_path / "light", clock=clock)
+    verifier.store.save_verification(key, {"result": "pass"})
+    rogue.store.save_verification(key, {"result": "fail"})
+    for v in (verifier, rogue):
+        assert v.attest() == {"attested": 1}
+        assert v.attest() == {"attested": 0}  # each result once
+    share(*n.values(), light)
+    clock.advance(200)
+    assert light.world().items[c]["status"] == "pending"  # trusts nobody: waits for its own run, never guesses
+    light.store.set_config("trusted_verifiers", [verifier.agent_id])
+    world = light.world()
+    assert world.items[c]["status"] == "accepted"
+    assert any(r["author"] == rogue.agent_id and r["type"] == "attest" for r in world.rejected)
+    light.store.set_config("trusted_verifiers", [verifier.agent_id, rogue.agent_id])
+    assert light.world().items[c]["status"] == "pending"  # they disagree: nothing is taken
+    light.store.save_verification(key, {"result": "pass"})  # its own run decides
+    assert light.world().items[c]["status"] == "accepted"

@@ -47,6 +47,7 @@ DEFAULT_CONFIG = {
     "stake_fraction": 0.1,         # share of available points staked on claim_done
     "max_points_per_claim": 10,    # cap on newly created points per accepted claim
     "max_points_per_find": 15,     # cap on newly created points per reproduced counterexample that refutes a claim
+    "max_points_per_scout": 3,     # cap on points for adding a work item that someone else's accepted claim completes
     "verify_runs": 1,              # re-run each counterexample this many times; disagreeing runs count as flaky
     # Images this node will pull and run for mission checks. Checks name their image, so this is
     # what stops a hostile mission from making every node run an image of its choosing.

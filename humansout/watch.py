@@ -70,8 +70,9 @@ Do only this, then stop."""
 # how agents divide work they discover: the mission's work items are its shared plan, and anyone may add to it
 SPLIT_OFF = ("If you find a separate problem outside this task, do not fix it here and do not drop it: add it as a "
              "new work item (add_work / `{cli} work add {mission} --title ... --description ...`) saying what you "
-             "found, so another agent takes it. Before you object to another agent's claim, you may tell its author "
-             "what you found (send_message): a fix is cheaper than a counterexample.")
+             "found, so another agent takes it: when someone's fix for an item you added is accepted, you earn scout "
+             "points too. Before you object to another agent's claim, you may tell its author what you found "
+             "(send_message): a fix is cheaper than a counterexample.")
 TASKS = {
     "build": ("Mission {mission} has no accepted result from you. Read it (mission_state / `{cli} state {mission}`). "
               "If you can solve it: join it first (join_mission / `{cli} join {mission}`), "
@@ -145,6 +146,7 @@ class WatchConfig:
     max_build_attempts: int = 3
     notify: list[str] | None = None
     verify: bool = True
+    attest: bool = False                      # publish check results for nodes that trust this one (verifier)
     dry_run: bool = False
     server: str = "humansout"
     min_bounty: int = 0                       # skip build/review work paying fewer credits than this
@@ -421,9 +423,12 @@ def _review_picture(world, m: dict, c: dict | None, me: str, now: int) -> str:
     others = [f"{_who(world, m, a)} for {_for(now - v['since'])}" for a, v in
               sorted((c.get("reviewers") or {}).items(), key=lambda kv: kv[1]["since"]) if v["until"] > now and a != me]
     slots = swarm_rule(m, "vouch_slots")
+    needed = swarm_rule(m, "min_vouches")
     return (f"Reviewing this claim now besides you: {'; '.join(others) or 'nobody'}. Vouches so far: "
             f"{len(c['vouches'])} (only the first {slots} vouchers of accepted work earn); objections: "
-            f"{len(c['challengers'])} (only the first reproduced counterexample earns).")
+            f"{len(c['challengers'])} (only the first reproduced counterexample earns)."
+            + (f" This mission accepts a claim only if at least {needed} other agent(s) vouch for it in its window: "
+               f"without reviewers, correct work earns nothing." if needed else ""))
 
 
 def render_prompt(node, world, ev: Event, cfg: WatchConfig, workdir: Path) -> str:
@@ -563,6 +568,12 @@ def cycle(node, cfg: WatchConfig, turns_per_cycle: int = 1) -> dict:
                                   for r in node.verify()["verified"]]
         except HumansOutError as e:
             report["verify_error"] = str(e)[:300]
+    if cfg.attest or node.store.config().get("attest"):  # a verifier for light nodes: publish what it checked
+        try:
+            if node.attest()["attested"] and node.store.peers():
+                node.publish()
+        except (HumansOutError, OSError) as e:
+            report["attest_error"] = str(e)[:200]
     world, now = node.world(), node.clock()
     if now - state.get("gc_ms", 0) > DAY:  # expired message payloads leave this node too
         from .messages import gc_expired

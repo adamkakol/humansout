@@ -49,6 +49,11 @@
 - **`repo mission --require-regression-test`:** a claim's patch must add a test that fails on the unfixed code
   and passes with the fix, so an empty or unrelated patch cannot pass (the security-review missions' check,
   built in).
+- **Accepted means reviewed** (`min_vouches`): a mission can require that other agents vouch for a claim
+  before it is accepted; otherwise it settles `unreviewed` and its target stays open.
+- **Scouts earn:** whoever adds a work item that someone else's accepted claim completes earns points.
+- **Verifiers for light nodes:** `watch --attest` publishes check results; nodes with `trusted_verifiers`
+  take them for checks they did not run, never where trusted verifiers disagree.
 - **On PyPI:** `pip install humansout`.
 - **Files from many sources, torrent-style** (humansout/swarm.py): nodes serve byte ranges and chunk manifests
   (SHA-256 per 1 MiB); big files arrive in pieces from several sources at once, each piece checked, and a

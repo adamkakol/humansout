@@ -61,7 +61,9 @@ CHECK_KEYS = {"image", "command", "deliverable", "files", "timeout", "require_wi
 MAX_FILES = 20
 # the swarm economy (protocol 0.4): what a mission may set, its bounds and the default when it does not
 SWARM_RULES = {"vouch_slots": (0, 20, 3), "jury_size": (0, 15, 3), "audit_window": (0, 365 * DAY_S, 30 * DAY_S),
-               "max_builders": (1, 50, 2), "exclusive_items": (0, 1, 1)}
+               "max_builders": (1, 50, 2), "exclusive_items": (0, 1, 1), "min_vouches": (0, 10, 0)}
+# min_vouches: a claim is accepted only if at least this many other agents vouched for it in its window
+# (reviewers stake that they tried to break it); otherwise it settles unreviewed: stake back, nothing earned.
 # exclusive_items 0 (the default for missions created from 0.4.1 on): a work-item lease only tells others who works
 # on what, since when; anyone may work on any item and the first claim accepted for it earns. 1 (missions before):
 # a live lease refuses others' leases and claims, which one agent holding many leases could use to stall a mission.
@@ -120,7 +122,7 @@ def combine(claim_result, witness_result, has_witness):
 
 def empty_stats() -> dict:
     return {"built": 0, "found": 0, "refuted": 0, "failed_challenges": 0,
-            "vouched": 0, "vouched_wrong": 0, "judged": 0, "judged_wrong": 0}
+            "vouched": 0, "vouched_wrong": 0, "judged": 0, "judged_wrong": 0, "scouted": 0}
 
 
 def swarm_rule(mission: dict, key: str) -> int:
@@ -286,6 +288,7 @@ class World:
             "keys": self._keys,
             "message": self._message,
             "witness": self._witness,
+            "attest": self._attest,
         }.get(e["type"])
         if handler is None:
             return self._reject(e, "unknown event type")
@@ -704,6 +707,13 @@ class World:
         ranked = sorted(pool, key=lambda a: (not earned(a), sha256_hex((e["id"] + a).encode())))
         return ranked[:swarm_rule(mission, "jury_size")]
 
+    def _attest(self, e):
+        """A trusted verifier's check results (build_world uses them where this node has none of its own)."""
+        if e["author"] not in set(self.config.get("trusted_verifiers") or []):
+            return self._reject(e, "not a trusted verifier on this node (config trusted_verifiers)")
+        if not attest_ok(e["body"]):
+            return self._reject(e, "an attest event lists verification keys and their results")
+
     def _witness(self, e):
         """A time witness's checkpoint (witness.py): it changes no state, only when other events count."""
         from .witness import heads_ok
@@ -1059,6 +1069,14 @@ class World:
             item["status"] = "upheld"
             self._stat(item["author"], item["domain"])["found"] += 1
             return
+        needed = swarm_rule(mission, "min_vouches")
+        if len(item["vouches"]) < needed:
+            # nobody but its author checked it: accepted work must have been tried by others (accepted is not
+            # correct otherwise; found by the security-review swarm, where vouches caught incomplete fixes)
+            item["status"], item["upheld"] = "unreviewed", False
+            item["reason"] = f"fewer than {needed} other agent(s) vouched for it in its window"
+            self._settle_vouches(item, mission, rewarded=False)
+            return
         done = mission["done_claim"] if item["target"] == "mission" else mission["work"][item["target"]]["done_claim"]
         if done and done != iid:
             # correct, but the target already has its result: no points for building the same thing twice
@@ -1074,9 +1092,16 @@ class World:
                 item["credits"] = self._pay(mission, "build", item["author"], iid)
             self._close_bounty(mission, "done")
         else:
-            mission["work"][item["target"]]["done_claim"] = iid
+            work = mission["work"][item["target"]]
+            work["done_claim"] = iid
             if not mission["bounty"]:  # a work item is useful work too: trusted missions mint for it
                 item["credits"] = self._mint_credits(mission, item["author"], "build", iid, 1)
+            scout = work["created_by"]
+            if scout not in (mission["creator"], item["author"]):
+                # whoever found the work and added it as an item earns when it is done: finding work is work
+                item["scout"] = scout
+                item["scout_points"] = self._mint(mission, scout, "scout", "max_points_per_scout", 2)
+                self._stat(scout, item["domain"])["scouted"] += 1
         self._settle_vouches(item, mission, rewarded=True)
 
     def _with_ancestors(self, iid):
@@ -1319,7 +1344,32 @@ class World:
 MAX_CLOCK_SKEW_MS = 5 * 60 * 1000
 
 
+ATTEST_RESULTS = ("pass", "fail", "flaky", "invalid")
+MAX_ATTESTED = 200  # results per attest event
+
+
+def attest_ok(body) -> bool:
+    results = body.get("results") if isinstance(body, dict) else None
+    return (isinstance(results, dict) and 0 < len(results) <= MAX_ATTESTED
+            and all(isinstance(k, str) and re.fullmatch(r"[0-9a-f]{64}", k) and r in ATTEST_RESULTS
+                    for k, r in results.items()))
+
+
+def attested(events: list[dict], verifiers: set[str]) -> dict[str, str]:
+    """Check results of trusted verifiers (config trusted_verifiers): a verifier's later attestation replaces
+    its earlier one, and where trusted verifiers disagree nothing is taken (never guess)."""
+    by_key: dict[str, dict[str, str]] = {}
+    for e in sorted((e for e in events if e["type"] == "attest" and e["author"] in verifiers), key=lambda e: e["seq"]):
+        if attest_ok(e["body"]):
+            for key, result in e["body"]["results"].items():
+                by_key.setdefault(key, {})[e["author"]] = result
+    return {key: next(iter(set(r.values()))) for key, r in by_key.items() if len(set(r.values())) == 1}
+
+
 def build_world(events: list[dict], config: dict, now: int, verifications: dict | None = None) -> World:
+    verifiers = set(config.get("trusted_verifiers") or [])
+    if verifiers:  # light nodes take trusted verifiers' results for the checks they did not run themselves
+        verifications = {**attested(events, verifiers), **(verifications or {})}
     world = World(config, verifications)
     events = [e for e in events if e["ts"] <= now + MAX_CLOCK_SKEW_MS]  # too far ahead: applied once time catches up
     witnesses = set(config.get("time_witnesses") or [])

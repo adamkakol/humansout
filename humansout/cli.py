@@ -263,6 +263,8 @@ def build_parser() -> argparse.ArgumentParser:
     wt.add_argument("--turn-timeout", type=int, default=1200, help="seconds before an agent turn is stopped")
     wt.add_argument("--notify", help='command run when a human is needed, e.g. "notify-send HumansOut {message}"')
     wt.add_argument("--no-verify", action="store_true", help="do not re-run counterexamples")
+    wt.add_argument("--attest", action="store_true", help="publish this node's check results, for nodes that "
+                    "trust it as a verifier (config trusted_verifiers); or set config attest")
     wt.add_argument("--server-name", default="humansout", help="name of the HumansOut MCP server in the harness")
     wt.add_argument("--model", help="model for the harness, e.g. claude-haiku-5-5 (claude), a codex model, or a local model name")
     wt.add_argument("--min-bounty", type=int, default=0, help="only build or review work paying at least this many credits")
@@ -545,7 +547,8 @@ def run(args) -> object:
             max_turns_per_day=args.max_turns_per_day, turn_timeout=args.turn_timeout,
             notify=shlex.split(args.notify) if args.notify else None, verify=not args.no_verify,
             dry_run=args.dry_run, server=args.server_name, min_bounty=args.min_bounty,
-            active_hours=_hours(args.active_hours), max_cost_per_day=args.max_cost_per_day, audit=not args.no_audit)
+            active_hours=_hours(args.active_hours), max_cost_per_day=args.max_cost_per_day, audit=not args.no_audit,
+            attest=args.attest)
         if roles and not cfg.harness and not args.dry_run:
             raise HumansOutError("--harness is required for build/break roles (or use --roles none or --dry-run)")
         if cfg.harness and cfg.shell:  # mission content is untrusted: say plainly what this harness can do

@@ -214,7 +214,10 @@ def test_through_two_real_nat_routers(mode, direct):
     import subprocess
     from pathlib import Path
     script = Path(__file__).resolve().parent.parent / "tools" / "nat_lab.sh"
-    out = subprocess.run([str(script), mode], capture_output=True, text=True, timeout=120)
+    import os
+    import sys
+    out = subprocess.run([str(script), mode], capture_output=True, text=True, timeout=120,
+                         env={**os.environ, "PYTHON": sys.executable})  # this interpreter, wherever it lives
     result = json.loads(out.stdout.strip().splitlines()[-1])
     assert result["direct"] is direct, out.stdout + out.stderr
     if direct:
