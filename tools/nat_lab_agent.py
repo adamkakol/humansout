@@ -23,7 +23,7 @@ def stun(port):
         while True:
             data, (host, p) = s.recvfrom(2048)
             if len(data) >= 20 and data[:2] == b"\x00\x01":
-                xip = bytes(a ^ b for a, b in zip(socket.inet_aton(host), struct.pack("!I", holepunch.MAGIC)))
+                xip = bytes(a ^ b for a, b in zip(socket.inet_aton(host), struct.pack("!I", holepunch.MAGIC), strict=True))
                 attr = struct.pack("!HHBBH", 0x0020, 8, 0, 1, p ^ (holepunch.MAGIC >> 16)) + xip
                 s.sendto(struct.pack("!HHI", 0x0101, len(attr), holepunch.MAGIC) + data[8:20] + attr, (host, p))
     threading.Thread(target=loop, daemon=True).start()

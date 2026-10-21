@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from humansout import HumansOutError, Node, sandbox
+from humansout import Node, sandbox
 from humansout import watch
 from humansout.net import serve
 

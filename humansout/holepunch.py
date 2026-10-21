@@ -84,7 +84,7 @@ def _mapped(data: bytes) -> tuple[str, int] | None:
         value = data[i + 4:i + 4 + length]
         if kind == 0x0020 and len(value) >= 8 and value[1] == 1:  # XOR-MAPPED-ADDRESS, IPv4
             port = struct.unpack("!H", value[2:4])[0] ^ (MAGIC >> 16)
-            return socket.inet_ntoa(bytes(a ^ b for a, b in zip(value[4:8], struct.pack("!I", MAGIC)))), port
+            return socket.inet_ntoa(bytes(a ^ b for a, b in zip(value[4:8], struct.pack("!I", MAGIC), strict=True))), port
         if kind == 0x0001 and len(value) >= 8 and value[1] == 1 and plain is None:  # MAPPED-ADDRESS
             plain = socket.inet_ntoa(value[4:8]), struct.unpack("!H", value[2:4])[0]
         i += 4 + length + (-length % 4)

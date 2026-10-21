@@ -7,8 +7,6 @@ import socket
 import struct
 import threading
 import time
-import urllib.error
-import urllib.request
 
 import pytest
 
@@ -31,7 +29,7 @@ def stun_server(shift_port=0):
                 continue
             port += shift_port
             xport = port ^ (holepunch.MAGIC >> 16)
-            xip = bytes(a ^ b for a, b in zip(socket.inet_aton(host), struct.pack("!I", holepunch.MAGIC)))
+            xip = bytes(a ^ b for a, b in zip(socket.inet_aton(host), struct.pack("!I", holepunch.MAGIC), strict=True))
             attr = struct.pack("!HHBBH", 0x0020, 8, 0, 1, xport) + xip
             s.sendto(struct.pack("!HHI", 0x0101, len(attr), holepunch.MAGIC) + data[8:20] + attr, (host, port - shift_port))
     threading.Thread(target=loop, daemon=True).start()

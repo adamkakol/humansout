@@ -90,7 +90,7 @@ def build_command(workdir: str, command: list[str], image: str = "python:3.12-sl
 def _size(folder: Path, limit: int) -> int:
     """Bytes under `folder` (not following links), counting up to just past `limit`."""
     total = 0
-    for root, dirs, files in os.walk(folder):
+    for root, _dirs, files in os.walk(folder):
         for f in files:
             try:
                 total += os.lstat(os.path.join(root, f)).st_size
