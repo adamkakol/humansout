@@ -229,8 +229,37 @@ def make_handler(store: Store, agent_id: str | None = None, show_turns: bool = F
                     return True
                 self._send(200, json.dumps(detail).encode())
                 return True
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+
+            def arg(name, default="", cast=str):
+                try:
+                    return cast(query.get(name, [default])[0][:200])
+                except (TypeError, ValueError):
+                    return cast(default)
+            if parts == ["api", "home"]:
+                self._send(200, json.dumps(dashboard.home(store, agent_id)).encode())
+                return True
+            if parts == ["api", "missions"]:
+                body = dashboard.missions(store, q=arg("q"), domain=arg("domain"), status=arg("status"),
+                                          sort=arg("sort", "activity"), offset=arg("offset", "0", int),
+                                          limit=arg("limit", "50", int))
+                self._send(200, json.dumps(body).encode())
+                return True
+            if parts == ["api", "stream"]:
+                mission = arg("mission") or None
+                if mission and not re.fullmatch(r"[0-9a-f]{64}", mission):
+                    mission = None
+                body = dashboard.stream(store, after=arg("after", "0", int), limit=arg("limit", "100", int), mission=mission)
+                self._send(200, json.dumps(body).encode())
+                return True
+            if parts == ["api", "docket"]:
+                self._send(200, json.dumps(dashboard.docket(store)).encode())
+                return True
+            if parts == ["api", "search"]:
+                self._send(200, json.dumps(dashboard.search(store, arg("q"))).encode())
+                return True
             if len(parts) == 3 and parts[:2] == ["api", "mission"] and re.fullmatch(r"[0-9a-f]{64}", parts[2]):
-                view = dashboard.mission_detail(store, parts[2])
+                view = dashboard.mission_detail(store, parts[2], log_limit=arg("log", "300", int))
                 if view is None:
                     self._send(404, b'{"error":"unknown mission"}')
                     return True
