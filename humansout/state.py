@@ -472,6 +472,9 @@ class World:
         b, clawed = mission["bounty"], 0
         earners = [(claim["author"], claim["credits"], claim["id"])] + [
             (v["author"], v["credits"], v["id"]) for v in claim["vouches"] if v.get("credits")]
+        if claim.get("scout_credits"):  # the scout is paid again when the redone work is accepted
+            earners.append((claim["scout"], claim["scout_credits"], claim["id"]))
+            mission["work"][claim["target"]]["scout_paid"] = False
         for agent, amount, iid in earners:
             if amount > 0:
                 self.credits[agent] = self.credit(agent) - amount
@@ -1607,6 +1610,10 @@ class World:
                     item["scout_credits"] = self._draw(mission, item["target"], "scout", scout, iid,
                                                        mission["bounty"]["prices"]["scout"])
                     work["scout_paid"] = bool(item["scout_credits"])
+                    # held like the builder's pay, and taken back with it if the fix is refuted in its audit
+                    # window: paid on wrong work, a scout and a second identity could spend it at once (found by
+                    # the security-review swarm, round 4)
+                    self._hold(scout, item["scout_credits"], item)
         self._settle_vouches(item, mission, rewarded=True)
         if v2:
             self._release_reserve(mission, item["target"])

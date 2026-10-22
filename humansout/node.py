@@ -12,6 +12,7 @@ import fnmatch
 import json
 import os
 import secrets
+import tempfile
 import time
 from pathlib import Path
 
@@ -234,8 +235,12 @@ class Node:
             kept = {}
         kept[digest] = {"agent": agent, "cid": cid, "salt": salt}
         event = self._emit("canary.commit", {"hash": digest, "bounty": int(bounty)})
-        path.write_text(json.dumps(kept, indent=1))
-        os.chmod(path, 0o600)
+        # created private (mkstemp: 0600) and moved into place: written first and chmod-ed after, the salts were
+        # readable by other local users for a moment (found by the security-review swarm, round 4)
+        fd, tmp = tempfile.mkstemp(dir=self.home, prefix=".canaries-")
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(kept, indent=1))
+        os.replace(tmp, path)
         return {"commit": digest, "agent": agent, "cid": cid, "bounty": int(bounty), "event": event["id"],
                 "next": "post that file as the claim's deliverable from that agent; once the claim has settled, "
                         "`humansout canary reveal`"}
@@ -718,6 +723,10 @@ class Node:
             raise HumansOutError("no container engine (docker or podman) found; see `humansout doctor`")
         _, data = self._read_local(deliverable)
         cid = self.store.put_blob(data)
+        refused = self._refused_patch(check, cid, self._blob_getter())
+        if refused:
+            return {"result": "fail", "image": check["image"], "environment": [check["deliverable"]],
+                    "output": "humansout: the patch may not change how the tests run: " + "; ".join(refused)}
         files = self._file_entries(tests or [])
         err = file_list_error(files, [check["deliverable"]] + [f["name"] for f in check.get("files", [])])
         if err:
@@ -753,6 +762,13 @@ class Node:
                 if not item["evidence"]["cids"]:
                     raise HumansOutError("the claim has no deliverable artifact to run")
                 deliverable = item["evidence"]["cids"][0]
+                refused = self._refused_patch(check, deliverable, get_blob)
+                if refused:
+                    self.store.save_verification(verification_key(check, deliverable, []), {
+                        "result": "fail", "reason": "the patch changes how the tests run: " + "; ".join(refused),
+                        "verified_ms": self.clock()})
+                    return {"claim": iid, "check": "fail", "refused": refused,
+                            "hint": "the patch changes how the tests run: it can never be accepted"}
                 res = run_check(get_blob, check, deliverable, (), runs)
                 self.store.save_verification(verification_key(check, deliverable, []),
                                              {"result": res["result"], "exit_codes": res["exit_codes"],
@@ -863,8 +879,19 @@ class Node:
         path.write_text(json.dumps(done, sort_keys=True))
         return {"attested": len(keys)}
 
+    def _refused_patch(self, check, deliverable, get_blob) -> list[str]:
+        from .repo import patch_refusal
+        return patch_refusal(get_blob, check, deliverable)
+
     def _verify_job(self, job: dict, check: dict, runs: int, get_blob) -> dict:
         """Run one pending job (a claim's own check, or a counterexample with its witness) and record it."""
+        if job.get("kind") == "check":
+            refused = self._refused_patch(check, job["deliverable"], get_blob)
+            if refused:  # the newest runner's rules, also for repo missions whose own runner is older
+                self.store.save_verification(verification_key(check, job["deliverable"], []), {
+                    "result": "fail", "reason": "the patch changes how the tests run: " + "; ".join(refused),
+                    "verified_ms": self.clock()})
+                return {"claim": job["claim"], "check": "fail", "refused": refused}
         if job.get("kind") == "check":   # the claim's own check: decides whether it can be accepted
             res = self._run_and_record(check, job["deliverable"], [], runs, get_blob)
             return {"claim": job["claim"], "check": "passes" if res["result"] == "pass" else res["result"],

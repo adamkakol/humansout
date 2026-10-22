@@ -176,9 +176,13 @@ unified diff strictly (exact context, offsets allowed, no renames or binary patc
 wheels offline, runs `test`, then runs any other `test_*.py` files in `/work` (counterexamples) with
 `extra`. Exit 0 only if all pass. Any node can verify it like any other check.
 With `"regression": true` in `repo_check.json` (`repo mission --require-regression-test`), the patch must also
-add or change a `test_*.py` file, those tests must pass with the patch and fail (exit code 1) on the snapshot
-with only them added, and it may not touch `conftest.py`, `sitecustomize.py`, `usercustomize.py` or `.pth`
-files: an empty patch, or one whose test passes without the fix, cannot pass. The check cannot tell a test that
+add or change a `test_*.py` file, and those tests must pass with the patch and fail (exit code 1) on the
+snapshot with only them added: an empty patch, or one whose test passes without the fix, cannot pass.
+In every mode the runner refuses, before anything runs, a patch that changes how the tests run: one that adds
+or changes `pytest.ini`, `.pytest.ini`, `pytest.toml`, `conftest.py`, `sitecustomize.py`, `usercustomize.py`
+or a `.pth` file, changes the
+test-runner section of `pyproject.toml`, `setup.cfg` or `tox.ini`, or adds a module named like a standard,
+runner or vendored one at the top level or inside a test folder (it would be imported instead of that one). The check cannot tell a test that
 shows a real problem from one that only needs something the patch adds (a new name, imported or asserted): the
 test's author decides how it fails. Reviewers catch those: a counterexample showing that the work item's
 problem is still there refutes the claim.

@@ -27,6 +27,12 @@
   - `watch` ranks paid work by the credits an agent can expect (price, its chance to be first, its record, its
     bond) and tells the agent the budget, the bond and that canaries exist.
 
+- **Flaws found by the fourth (first paid) security-review round, fixed** (docs/SECURITY_REVIEW.md, S13–S16):
+  - repo checks refuse, in every mode, a patch that changes how the tests run: runner config and hook files,
+    the test-runner sections of pyproject.toml, setup.cfg and tox.ini, and new modules named like standard,
+    runner or vendored ones (a patch could replace the runner and make every test and counterexample pass);
+  - a scout's share is held, and taken back when the fix is refuted;
+  - canary salts are written private from the start.
 - **Flaws found by the third security-review round, fixed** (docs/SECURITY_REVIEW.md, S8–S12):
   - credits earned on a claim are held until it can no longer be refuted, so they cannot be passed on through
     a bounty ahead of a clawback (`credits` shows `held`);

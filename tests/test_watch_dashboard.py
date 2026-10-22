@@ -526,3 +526,15 @@ def test_a_new_claim_gets_its_natural_reviewers_and_the_others_keep_building(tmp
         first_moves.append(events[0].kind)
         assert any(e.kind == "review" and e.item == claim for e in events)  # everyone may still review it
     assert first_moves.count("review") == 2 and first_moves.count("build") == 2
+    # an agent that was not a natural reviewer vouches: it takes a slot, so only one natural reviewer is left (the
+    # paid round of 22 October: two agents ranked themselves first for a claim that already had a vouch)
+    def first(a):
+        return watch.find_work(a.world(), a.agent_id, clock(), watch.WatchConfig(roles=("build", "break")),
+                               watch.load_state(a.home))[0].kind
+    keen = next(a for a in agents[1:] if first(a) == "build")
+    keen.vouch(claim, "checked it")
+    for y in everyone:
+        if y is not keen:
+            share(keen, y)
+    first_moves = [first(a) for a in agents[1:] if a is not keen]
+    assert first_moves.count("review") == 1 and first_moves.count("build") == 2

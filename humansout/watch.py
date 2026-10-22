@@ -360,12 +360,19 @@ def find_work(world, me: str, now: int, cfg: WatchConfig, state: dict, node_mess
                         # its natural reviewers: every agent ranks the other participants by a hash of the claim and
                         # their ids, and the first vouch_slots of them review it before building; the rest build
                         # first (round 3 of the security review: four agents reviewed one claim in the same second)
-                        others = sorted((a for a in m["participants"] if a not in (c["author"], m["creator"])),
+                        # Agents that already vouched, objected or are reviewing it now are out of the ranking and
+                        # take their slots (the paid round of 22 October: two agents both ranked themselves first
+                        # for a claim another agent had already vouched for, and left the others unreviewed).
+                        done = ({v["author"] for v in c["vouches"]}
+                                | {world.items[x]["author"] for x in c["challengers"]})
+                        live = {a for a, v in (c.get("reviewers") or {}).items() if v["until"] > now and a != me}
+                        left = max(0, slots - len(c["vouches"]) - len(live - done))
+                        others = sorted((a for a in m["participants"]
+                                         if a not in (c["author"], m["creator"]) and a not in done | live),
                                         key=lambda a: _spread(a, c["id"]))
-                        natural = me not in others or others.index(me) < max(1, slots)
+                        natural = left > 0 and (me not in others or others.index(me) < left)
                         review.append(Event("review", mid, c["id"], {"cid": (c["evidence"]["cids"] or [None])[0],
-                                                                     "bounty": pays,
-                                                                     "slots_left": max(0, slots - len(c["vouches"])),
+                                                                     "bounty": pays, "slots_left": left,
                                                                      "spread": _spread(me, c["id"]),
                                                                      "natural": natural}))
         if "build" in cfg.roles and not mine_creator:

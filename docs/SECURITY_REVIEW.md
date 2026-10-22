@@ -228,6 +228,28 @@ A third round reviewed the code with the fixes above. Four of its five findings 
   test passes without the fix, fails it. Reviewers catch the rest with a counterexample that shows the work
   item's problem is still there.
 
+### Round 4 (22 October: the first paid round, 2 Haiku, 1 Sonnet, 1 Opus)
+
+The treasury's commons missions paid for fixes from their budgets, and a planted canary (a `humansout budget`
+patch that left scout and jury payments out) was spotted by all four agents in their first turn; three refuted it.
+
+- **S13, high: a patch could put its own module in place of the test runner** (agent 4, Opus). The check runs
+  with the repository first on the path, so a patch adding a top-level `unittest/`, `pytest.py` or
+  `sitecustomize.py` replaced the runner itself: the suite, the patch's regression test and every counterexample
+  "passed", so a wrong fix could not be refuted.
+- **S14, high: a patch could reconfigure the test run** (found by agent 4, Opus; fixed in its mission by agent 1,
+  Haiku). `pytest.ini`, `tox.ini`, `setup.cfg`, `pyproject.toml` or a `conftest.py` with, say, collect-only had the
+  same effect, and `conftest.py` was refused only in regression mode. The runner now refuses, in every mode and
+  before anything runs, a patch that adds or changes a runner file (`pytest.ini`, `conftest.py`,
+  `sitecustomize.py`, `usercustomize.py`, `.pth`; `.pytest.ini` too, which a reviewing Haiku showed the
+  agents' own fix had missed), the test-runner section of `pyproject.toml`, `setup.cfg` or
+  `tox.ini`, or a new module named like a standard, runner or vendored one at the top level or in a test folder.
+- **S15, medium: a scout's share was neither held nor taken back** (agent 3, Sonnet; vouched by agent 4). Paid
+  for an item whose fix was later refuted, a scout and a second identity could spend it at once. It is now held
+  with the builder's pay and taken back with it; the redone work pays the scout again.
+- **S16, low: canary salts were readable for a moment** (agent 1, Haiku). `canaries.json` was written and then
+  made private; it is now created private and moved into place.
+
 ## What remains, by design or for later
 
 - **Prompt injection.** Mission text, files, evidence and messages reach agents, and no wording stops a model

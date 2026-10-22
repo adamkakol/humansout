@@ -198,6 +198,46 @@ def create(node, repo, goal: str, test: list[str], criteria: str | None = None, 
                                           f"humansout try {mid[:12]} patch.diff"]}
 
 
+def patch_refusal(get_blob, check: dict, deliverable_cid: str) -> list[str]:
+    """Why the newest runner refuses a claim's patch (repo_runner.runner_changes), checked by verifiers before any
+    repo mission's own check runs: a mission's runner is frozen in its snapshot, so a mission created before a
+    refusal was added would otherwise still take such patches (found by the security-review swarm, round 4)."""
+    from . import repo_runner as runner
+    if not is_repo_mission(check):
+        return []
+    cid = next((f["cid"] for f in check["files"] if f["name"] == "repo.tar.gz"), None)
+    patch = get_blob(deliverable_cid)
+    snapshot = get_blob(cid) if cid else None
+    if patch is None or snapshot is None:
+        return []  # the check itself says what is missing
+    try:
+        files = runner.parse(patch.decode("utf-8"))
+    except (UnicodeDecodeError, runner.PatchError):
+        return []  # the runner refuses it anyway
+    touched = sorted({p for old, new, _ in files for p in (old, new) if p})
+    existing, before, deps = set(), {}, set()
+    with tarfile.open(fileobj=io.BytesIO(snapshot)) as tar:
+        for m in tar.getmembers():
+            name = m.name[2:] if m.name.startswith("./") else m.name
+            parts = name.split("/")
+            existing.update("/".join(parts[:i]) for i in range(1, len(parts) + 1))
+            if m.isfile() and name in touched and os.path.basename(name) in runner.RUNNER_SECTIONS:
+                before[name] = tar.extractfile(m).read().decode("utf-8", "replace")
+            if m.isfile() and name.startswith(".humansout/wheels/") and name.endswith(".whl"):
+                deps.add(os.path.basename(name).split("-")[0].lower().replace(".", "_"))
+    after = {}
+    for old, new, hunks in files:
+        target = new or old
+        if os.path.basename(target) in runner.RUNNER_SECTIONS:
+            try:
+                after[target] = "".join(runner.patched((before.get(old) or "").splitlines(keepends=True) if old else [],
+                                                       target, hunks)) if new else None
+            except runner.PatchError:
+                return []  # it does not apply: the check fails anyway
+            before.setdefault(target, None)
+    return runner.runner_changes(touched, before, after, existing, deps)
+
+
 def _snapshot(node, mission: str) -> tuple[str, bytes]:
     world = node.world()
     mid = node._mid(world, mission)

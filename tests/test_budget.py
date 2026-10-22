@@ -523,3 +523,44 @@ def test_agents_get_no_tool_that_spends_their_owners_credits(net):
     assert not {"transfer", "treasury", "fund_work", "credit_transfer", "canary_commit", "canary_reveal"} & set(tools)
     assert "bounty" not in tools["create_mission"]["schema"]["properties"]
     assert tools["create_mission"]["schema"]["additionalProperties"] is False
+
+
+def test_a_scouts_share_is_held_and_given_back_when_the_fix_is_refuted(net):
+    """Found by the security-review swarm (round 4): the scout's share was neither held nor taken back, so a scout
+    and a second identity could spend at once what a wrong fix earned."""
+    clock, n, tmp, test = net
+    mid = mission(n["alice"], test, {"budget": 40, "item": 10, "scout": 3, "find": 2}, audit_window=600)
+    share(*n.values())
+    n["carol"].join(mid)
+    wid = n["carol"].add_work(mid, "an item carol found")["work_id"]
+    share(*n.values())
+    n["alice"].fund_work(mid, wid)
+    share(*n.values())
+    clock.advance(1)
+    claim = build(n, "bob", mid, tmp, "v1", work_id=wid)
+    clock.advance(101)
+    assert credits(n, "carol")["held"] == 3
+    refute(n, "dave", claim, tmp)  # inside the audit window
+    clock.advance(10)
+    world = n["treasury"].world()
+    assert world.items[claim]["status"] == "refuted_late"
+    assert credits(n, "carol")["credits"] == 50  # the share came back
+    assert world.missions[mid]["work"][wid]["reserve"] == 13  # reserved again with the scout's share
+    redo = build(n, "dave", mid, tmp, "v2", work_id=wid)
+    clock.advance(101 + 600 + 106)
+    assert n["treasury"].world().items[redo]["scout_credits"] == 3 and credits(n, "carol")["credits"] == 53
+
+
+def test_canary_salts_are_never_readable_by_others(net, monkeypatch):
+    """Found by the security-review swarm (round 4): canaries.json was written first and chmod-ed after, so for a
+    moment other local users could read the salts and tell which claim is a canary."""
+    import os
+    clock, n, tmp, test = net
+    n["treasury"].treasury(issue=100)
+    monkeypatch.setattr(os, "chmod", lambda *a, **k: None)  # the old code relied on it; the file must be private anyway
+    old = os.umask(0)
+    try:
+        n["treasury"].canary_commit(n["dave"].agent_id, deliverable(tmp, "dave", "faulty"), bounty=1)
+    finally:
+        os.umask(old)
+    assert (n["treasury"].home / "canaries.json").stat().st_mode & 0o777 == 0o600

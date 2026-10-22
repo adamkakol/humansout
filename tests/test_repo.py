@@ -143,6 +143,13 @@ def test_repo_mission_end_to_end(tmp_path, capsys):
     out = repo.diff(builder, mid, str(work), str(builder.home / "work" / "patch.diff"))
     assert out["changed"] == ["calc/__init__.py"]
     assert builder.try_check(mid, out["written_to"])["result"] == "pass"
+    hooked = builder.home / "work" / "hooked"  # the same fix, but it also brings a conftest.py: refused
+    repo.checkout(builder, mid, str(hooked))
+    (hooked / "calc/__init__.py").write_text((work / "calc/__init__.py").read_text())
+    (hooked / "tests/conftest.py").write_text("collect_ignore = []\n")
+    hooked_patch = repo.diff(builder, mid, str(hooked), str(builder.home / "work" / "hooked.diff"))["written_to"]
+    refused = builder.try_check(mid, hooked_patch)
+    assert refused["result"] == "fail" and "may not change how the tests run" in refused["output"]
     cid = builder.publish_artifact(mid, out["written_to"])["cid"]
     claim = builder.claim_done(mid, "add() fixed; tests pass", cids=[cid])["claim"]
     share(creator, builder, breaker)
@@ -322,3 +329,84 @@ def test_a_regression_mission_takes_only_a_fix_with_a_test_that_fails_without_it
                             "tests/conftest.py": "collect_ignore = []\n"})["result"] == "fail"
     good = attempt("good", {"calc/__init__.py": fixed, "tests/test_add.py": real_test})
     assert good["result"] == "pass" and "fail without the fix and pass with it" in good["output"]
+
+
+def test_a_patch_may_not_change_how_the_tests_run():
+    """Found by the security-review swarm (round 4): a patch could reconfigure pytest, add a conftest.py, or put its
+    own module where the test runner or a standard module is imported from. Then the suite, the patch's regression
+    test and every counterexample "passed", so a wrong fix could not be refuted. The runner refuses such patches in
+    every mode, before anything runs; the project's own files with such names stay its own."""
+    snapshot = {"calc", "calc/__init__.py", "tests", "tests/__init__.py", "tests/test_calc.py", "json",
+                "json/__init__.py", "pyproject.toml"}
+    meta = {"pyproject.toml": "[project]\nversion = '1'\n[tool.pytest.ini_options]\naddopts = '-q'\n"}
+
+    def refused(paths, after=None):
+        return runner.runner_changes(paths, meta, after or meta, snapshot, {"tinydep"})
+    assert refused(["calc/__init__.py", "calc/json.py", "tests/test_new.py", "json/extra.py"]) == []
+    assert refused(["pyproject.toml"], {"pyproject.toml": meta["pyproject.toml"].replace("'1'", "'2'")}) == []
+    for paths in (["pytest.ini"], [".pytest.ini"], ["pytest.toml"], ["tests/conftest.py"], ["sitecustomize.py"], ["usercustomize.py"], ["x/y.pth"],
+                  ["unittest/__main__.py"], ["pytest.py"], ["_pytest/__init__.py"], ["json.py"], ["tinydep.py"],
+                  ["tests/re.py"], ["tests/helpers/logging.py"]):
+        assert refused(paths), paths
+    assert refused(["pyproject.toml"], {"pyproject.toml": meta["pyproject.toml"].replace("-q", "--co")})
+    assert runner.runner_changes(["tox.ini"], {"tox.ini": None}, {"tox.ini": "[pytest]\naddopts = -k x\n"},
+                                 snapshot, set())
+
+
+def test_verifiers_apply_the_newest_patch_rules_to_older_repo_missions(tmp_path, monkeypatch):
+    """A repo mission's runner is frozen in its snapshot. Verifiers check each claim's patch against the newest
+    runner's rules first, so missions created before a rule existed (the commons missions of round 4) cannot be
+    passed by a patch that changes how the tests run, and builders hear so from try_check."""
+    import io
+    import tarfile as tf
+    from humansout import node as node_module
+    from humansout.core import cid_for
+    snap = io.BytesIO()
+    with tf.open(fileobj=snap, mode="w:gz") as tar:
+        for name, text in {"calc/__init__.py": "X = 1\n", "tests/test_calc.py": "import calc\n",
+                           "pyproject.toml": "[project]\nname = 'calc'\n"}.items():
+            data = text.encode()
+            info = tf.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    folder = tmp_path / "check"
+    folder.mkdir()
+    (folder / "repo.tar.gz").write_bytes(snap.getvalue())
+    (folder / repo.RUNNER).write_text("# the mission's own, older runner\n")
+    creator = Node(tmp_path / "creator")
+    mid = creator.create_mission("Fix calc", "software/python", "tests pass", challenge_window=100,
+                                 check={"command": ["python", repo.RUNNER], "deliverable": repo.DELIVERABLE,
+                                        "files": [str(folder / "repo.tar.gz"), str(folder / repo.RUNNER)]})["mission_id"]
+    check = creator.world().missions[mid]["check"]
+    blobs = {f["cid"]: creator.store.get_blob(f["cid"]) for f in check["files"]}
+
+    def refusal(patch):
+        cid = cid_for(patch.encode())
+        return repo.patch_refusal({**blobs, cid: patch.encode()}.get, check, cid)
+    assert refusal("--- a/calc/__init__.py\n+++ b/calc/__init__.py\n@@ -1 +1 @@\n-X = 1\n+X = 2\n") == []
+    assert refusal("--- /dev/null\n+++ b/pytest.ini\n@@ -0,0 +1,2 @@\n+[pytest]\n+addopts = -q\n")
+    assert refusal("--- a/pyproject.toml\n+++ b/pyproject.toml\n@@ -1 +1,3 @@\n [project]\n"
+                   "+[tool.pytest.ini_options]\n+addopts = '-q'\n")
+    assert refusal("--- /dev/null\n+++ b/unittest/__init__.py\n@@ -0,0 +1 @@\n+X = 1\n")
+
+    def no_run(*a, **k):
+        raise AssertionError("a refused patch must not run")
+    monkeypatch.setattr(node_module, "run_check", no_run)
+    patch = tmp_path / "patch.diff"
+    patch.write_text("--- a/calc/__init__.py\n+++ b/calc/__init__.py\n@@ -1 +1 @@\n-X = 1\n+X = 2\n"
+                     "--- /dev/null\n+++ b/tests/conftest.py\n@@ -0,0 +1 @@\n+collect_ignore = []\n")
+    builder = Node(tmp_path / "builder")
+    builder.store.ingest(creator.agent_id, creator.store.load_feed(creator.agent_id))
+    for f in check["files"]:
+        builder.store.put_blob(blobs[f["cid"]])
+    monkeypatch.setattr(node_module.sandbox, "find_engine", lambda: "docker")
+    tried = builder.try_check(mid, str(patch))
+    assert tried["result"] == "fail" and "may not change how the tests run" in tried["output"]
+    builder.join(mid)
+    cid = builder.publish_artifact(mid, str(patch), repo.DELIVERABLE)["cid"]
+    claim = builder.claim_done(mid, "fixed", cids=[cid])["claim"]
+    creator.store.ingest(builder.agent_id, builder.store.load_feed(builder.agent_id))
+    creator.store.put_blob(patch.read_bytes())
+    out = creator.verify()
+    assert [r.get("check") for r in out["verified"]] == ["fail"] and out["verified"][0]["refused"]
+    assert creator.world().items[claim]["check_result"] == "fail"
