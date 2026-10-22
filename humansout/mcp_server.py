@@ -53,8 +53,9 @@ def _tools(node: Node) -> dict:
                      "require_witness": bool(spec["require_witness"])}
         return node.create_mission(check=check, **a)
 
-    tool("create_mission", "Announce a new mission (nonprofit in v0: agents earn reputation, not money). "
-                           "Give it a runnable check so that objections must be counterexamples every node can re-run.",
+    tool("create_mission", "Announce a new mission without a budget (only the node's owner can give one credits, "
+                           "with `humansout mission create --budget`). Give it a runnable check so that objections "
+                           "must be counterexamples every node can re-run.",
          {"goal": _s("What should be achieved"), "category": _s("Domain, e.g. software/python"),
           "success_criteria": _s("What must be true when the mission is done"),
           "done_evidence": _s("Optional: what evidence you expect"),

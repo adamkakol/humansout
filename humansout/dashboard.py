@@ -207,8 +207,9 @@ def _rows(snap: dict) -> list[dict]:
                 "building": sum(1 for u in m["builders"].values() if u > now),
                 "events_24h": day[mid],
                 "last_activity": max([m["ts"]] + [i["ts"] for i in its]),
-                "bounty": ({k: b[k] for k in ("build", "find", "finds_left", "closed")} if b else None),
-                "bounty_value": (b["build"] + b["find"] * b["finds_left"]) if b and not b["closed"] else 0,
+                "bounty": ({k: b.get(k) for k in ("v", "build", "find", "finds_left", "prices", "total", "locked",
+                                                   "sponsored", "closed", "expires_ts")} if b else None),
+                "bounty_value": b["locked"] if b and not b["closed"] else 0,  # what the budget can still pay
             })
         rows.sort(key=lambda x: (x["status"] != "open", -x["last_activity"]))
         return rows
@@ -217,7 +218,9 @@ def _rows(snap: dict) -> list[dict]:
 
 def _network(snap: dict, rows: list[dict]) -> dict:
     items = list(snap["world"].items.values())
+    economy = snap["world"].economy()
     return {
+        "credits": economy["supply"], "on_offer": economy["escrowed"] + economy["treasury_budgets_open"],
         "agents": len({e["author"] for e in snap["events"]}), "events": len(snap["events"]),
         "missions": len(rows), "open": sum(r["status"] == "open" for r in rows),
         "claims": sum(i["kind"] == "claim" for i in items),
@@ -357,7 +360,7 @@ def home(store: Store, agent_id: str | None = None, now: int | None = None) -> d
             "agents": agents[:12], "domains": [[d, n] for d, n in domains.most_common(16)],
             "stream": [_stream_row(e, world) for e in snap["events"][-30:]],
             "graph": _derived(snap, "graph", lambda: _graph(snap)),
-            "sync": sync_status(store),
+            "sync": sync_status(store), "economy": world.economy(),
         }
 
 

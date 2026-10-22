@@ -6,7 +6,7 @@ A mission spec is a JSON file next to the files it names:
      "check": {"command": ["python", "-m", "unittest", "discover", "-s", "/work"],
                "deliverable": "slugify.py", "files": ["test_public.py"], "image": "python:3.12-slim"},
      "starter": ["slugify.py"], "window": 86400, "dispute_window": 3600,
-     "bounty": {"build": 5, "find": 2, "max_finds": 3}}
+     "bounty": {"budget": 40, "item": 10, "review": 2, "find": 10}}
 
 `humansout mission create --from mission.json` announces it and publishes the starter files.
 Starter files other than the deliverable are also put into the check, so tests can read the same

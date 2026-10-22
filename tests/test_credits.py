@@ -99,7 +99,7 @@ def test_trusted_missions_mint_credits_others_do_not(net):
 
 def test_bounty_needs_credits(net):
     clock, n, tmp, test = net
-    with pytest.raises(HumansOutError, match="not enough credits for a bounty of 5"):
+    with pytest.raises(HumansOutError, match="not enough credits for a budget of 5"):
         runnable(n["carol"], test, bounty={"build": 5})
 
 

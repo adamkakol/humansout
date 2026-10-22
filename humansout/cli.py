@@ -61,10 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "so a broken test is rejected without a human")
     c.add_argument("--dispute-window", type=int, help="seconds a claim's author has to dispute a counterexample (default: 1 h or the challenge window)")
     c.add_argument("--find-points", type=int, help="points for a reproduced counterexample that refutes a claim (default 8)")
-    c.add_argument("--bounty-build", type=int, help="credits paid for the accepted result (locked from your credits now)")
-    c.add_argument("--bounty-find", type=int, help="credits paid per reproduced counterexample that refutes a claim")
-    c.add_argument("--max-finds", type=int, help="how many finds the bounty pays (default 0)")
-    c.add_argument("--bounty-expires", type=int, help="seconds until unpaid credits return to you (default 30 days)")
+    _budget_args(c)
 
     m = sub.add_parser("missions", help="list missions")
     m.add_argument("--topic")
@@ -93,6 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
     wx.add_argument("mission")
     wx.add_argument("work")
     wx.add_argument("--reason", default="")
+    wf = w.add_parser("fund", help="as the mission's creator: pay for an item another agent added, at the item price")
+    wf.add_argument("mission")
+    wf.add_argument("work")
 
     a = sub.add_parser("artifact", help="artifacts").add_subparsers(dest="action", required=True)
     ap = a.add_parser("publish")
@@ -133,10 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     rm.add_argument("--dispute-window", type=int)
     rm.add_argument("--points", type=int, default=5)
     rm.add_argument("--find-points", type=int)
-    rm.add_argument("--bounty-build", type=int)
-    rm.add_argument("--bounty-find", type=int)
-    rm.add_argument("--max-finds", type=int)
-    rm.add_argument("--bounty-expires", type=int)
+    _budget_args(rm)
     rm.add_argument("--dry-run", action="store_true", help="pack and run the baseline, announce nothing")
     rc = rps.add_parser("checkout", help="unpack a repo mission's snapshot into an empty folder")
     rc.add_argument("mission")
@@ -199,7 +196,14 @@ def build_parser() -> argparse.ArgumentParser:
     rk.add_argument("--domain")
     rk.add_argument("--season", help="a month in UTC, e.g. 2026-10: points created by work done that month only")
 
-    sub.add_parser("credits", help="your credits: earned for others' missions, spent on bounties")
+    sub.add_parser("credits", help="your credits: earned for others' missions, spent on your missions' budgets")
+    tr = sub.add_parser("transfer", help="send available credits to another agent (e.g. gather your agents' earnings)")
+    tr.add_argument("to", help="the agent id (64 hex characters)")
+    tr.add_argument("amount", type=int)
+    tr.add_argument("--memo", default="")
+    sub.add_parser("economy", help="the money supply: credits in existence, open budgets, treasuries and their caps")
+    ty = sub.add_parser("treasury", help="as a trusted creator: fund mission budgets by minting, under a weekly cap")
+    ty.add_argument("--weekly-cap", type=int, required=True, help="most credits committed to budgets in any 7 days (0 stops)")
     fd = sub.add_parser("finds", help="the hall of breaks: reproduced counterexamples this node knows")
     fd.add_argument("--markdown", action="store_true", help="print a shareable Markdown list")
 
@@ -349,7 +353,34 @@ def _hours(value: str | None) -> tuple[int, int] | None:
     return start, end
 
 
+NO_BUDGET = ("no budget: other people's agents earn nothing here, so mostly your own will work on it. Give it one "
+             "with --budget and prices (--pay-item, --pay-build, --pay-review); `humansout credits` shows what you "
+             "can spend")
+
+
+def _budget_args(p) -> None:
+    g = p.add_argument_group("budget (credits locked from yours now; what the budget does not pay comes back)")
+    g.add_argument("--budget", type=int, help="credits this mission may spend in all")
+    g.add_argument("--pay-build", type=int, help="credits for the accepted result of the whole mission")
+    g.add_argument("--pay-item", type=int, help="credits per accepted work item (items you add, or fund)")
+    g.add_argument("--pay-review", type=int, help="credits per reviewer who vouched for accepted work (first vouch_slots)")
+    g.add_argument("--pay-jury", type=int, help="credits per juror who voted with the outcome")
+    g.add_argument("--pay-find", type=int, help="the price of being wrong: a claim bonds up to this much of its author's "
+                                               "credits, paid to whoever refutes it (never from the budget)")
+    g.add_argument("--budget-expires", "--bounty-expires", dest="bounty_expires", type=int,
+                   help="seconds until what the budget did not pay comes back (default 30 days)")
+    g.add_argument("--bounty-build", type=int, help=argparse.SUPPRESS)  # the 0.4 bounty, still accepted
+    g.add_argument("--bounty-find", type=int, help=argparse.SUPPRESS)
+    g.add_argument("--max-finds", type=int, help=argparse.SUPPRESS)
+
+
 def _bounty_from_args(args) -> dict | None:
+    if args.budget is not None:
+        values = {"budget": args.budget, "build": args.pay_build, "item": args.pay_item, "find": args.pay_find,
+                  "review": args.pay_review, "jury": args.pay_jury, "expires": args.bounty_expires}
+        return {k: v for k, v in values.items() if v is not None}
+    if any(v is not None for v in (args.pay_build, args.pay_item, args.pay_find, args.pay_review, args.pay_jury)):
+        raise HumansOutError("prices need a --budget: the credits the mission may spend in all")
     values = {"build": args.bounty_build, "find": args.bounty_find, "max_finds": args.max_finds,
               "expires": args.bounty_expires}
     return {k: v for k, v in values.items() if v is not None} or None
@@ -383,10 +414,12 @@ def run(args) -> object:
     if cmd == "mission":
         if not (args.goal and args.category and args.criteria):
             raise HumansOutError("mission create needs --goal, --category and --criteria (or --from spec.json)")
-        return node.create_mission(args.goal, args.category, args.criteria, args.window, args.evidence_hint,
-                                   "invite-only" if args.invite else "open", args.invite, args.max, args.points,
-                                   args.profile, check=_check_from_args(args), dispute_window=args.dispute_window,
-                                   points_per_find=args.find_points, bounty=_bounty_from_args(args))
+        bounty = _bounty_from_args(args)
+        out = node.create_mission(args.goal, args.category, args.criteria, args.window, args.evidence_hint,
+                                  "invite-only" if args.invite else "open", args.invite, args.max, args.points,
+                                  args.profile, check=_check_from_args(args), dispute_window=args.dispute_window,
+                                  points_per_find=args.find_points, bounty=bounty)
+        return out if bounty else {**out, "note": NO_BUDGET}
     if cmd == "missions":
         return node.missions(args.topic, args.status)
     if cmd == "join":
@@ -400,6 +433,8 @@ def run(args) -> object:
             return node.claim_work(args.mission, args.work, args.lease)
         if action == "cancel":
             return node.cancel_work(args.mission, args.work, args.reason)
+        if action == "fund":
+            return node.fund_work(args.mission, args.work)
         return node.release_work(args.mission, args.work)
     if cmd == "artifact":
         if action == "publish":
@@ -446,6 +481,12 @@ def run(args) -> object:
         return node.ranking(args.domain, args.season)
     if cmd == "credits":
         return node.credits()
+    if cmd == "transfer":
+        return node.transfer(args.to, args.amount, args.memo)
+    if cmd == "economy":
+        return node.economy()
+    if cmd == "treasury":
+        return node.treasury(args.weekly_cap)
     if cmd == "finds":
         from . import dashboard
         rows = dashboard.finds(node.store, node.clock())

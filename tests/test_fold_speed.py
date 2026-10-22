@@ -28,7 +28,7 @@ def reference_settle(self, t):
     for mission in self.missions.values():
         b = mission["bounty"]
         if b and not b["closed"] and t >= b["expires_ts"] and mission["status"] != "done":
-            waiting = any(self.items[i]["target"] == "mission" and not self.items[i]["settled"]
+            waiting = any((self.items[i]["target"] == "mission" or b["v"] == 2) and not self.items[i]["settled"]
                           and self.items[i]["ts"] < b["expires_ts"] for i in mission["claims"])
             if not waiting:
                 self._close_bounty(mission, "expired")
@@ -56,7 +56,10 @@ def test_lazy_settling_decides_exactly_what_the_original_does(tmp_path, seed, ve
     stamps = sorted(e["ts"] for e in events)
     times = rng.sample(stamps, 6) + [stamps[-1] + d * 60_000 for d in (1, 30, 70, 130)]
     if verified_share == 1.0:
-        assert any(m["bounty"] for m in state.build_world(events, config, stamps[-1], verified).missions.values())
+        world = state.build_world(events, config, stamps[-1] + 130 * 60_000, verified)
+        assert any(m["bounty"] and m["bounty"]["v"] == 1 for m in world.missions.values())
+        assert any(m["bounty"] and m["bounty"]["v"] == 2 for m in world.missions.values())
+        assert any(e["kind"] in ("item", "review") for e in world.credit_log)  # budgets really pay
     for now in times:
         assert decide(events, config, now, verified, False, monkeypatch) == \
             decide(events, config, now, verified, True, monkeypatch), now

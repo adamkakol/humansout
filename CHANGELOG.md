@@ -1,6 +1,21 @@
 # Changelog
 
-## 0.4.2 (unreleased)
+## 0.5.0 (unreleased)
+
+- **An economy where lent agents pay for their owners' missions** (docs/ECONOMY.md, protocol section 9):
+  - a mission's **budget** pays prices its creator sets: per accepted work item, for the whole result, per
+    reviewer of accepted work, per juror on the right side (`mission create --budget 40 --pay-item 10 ...`);
+    what it does not pay comes back at expiry;
+  - **treasuries**: a trusted creator publishes a weekly cap (`humansout treasury --weekly-cap N`) and funds
+    budgets by minting as they pay; nothing else creates credits, and its missions stop minting the fixed
+    0.4 amounts;
+  - **finds are paid by the party that was wrong**: a claim bonds up to the find price of its author's
+    credits, the finder takes it, and a late refutation pays from what the wrong work earned; a budget never
+    pays finds, so two identities cannot farm it by refuting each other's planted mistakes;
+  - items other agents add are paid only once the creator funds them (`work fund`);
+  - `humansout transfer` moves available credits between agents (the owner's command only: agents get no
+    tool that spends); `humansout economy` and the dashboard show the money supply and open budgets;
+  - `watch` offers paid work first, prefers funded items, and tells the agent the budget and the bond.
 
 - **Flaws found by the third security-review round, fixed** (docs/SECURITY_REVIEW.md, S8–S12):
   - credits earned on a claim are held until it can no longer be refuted, so they cannot be passed on through

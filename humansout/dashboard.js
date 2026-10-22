@@ -184,7 +184,7 @@ function homeView(view) {
       pane("hot missions", "hot", el("a", { class: "more", href: "#/missions?sort=busy" }, "all →")),
       pane("needs reviewers", "review", null),
       pane("juries in session", "juries", el("a", { class: "more", href: "#/juries" }, "docket →")),
-      pane("open bounties", "bounties", el("a", { class: "more", href: "#/missions?sort=bounty&status=open" }, "all →")),
+      pane("open budgets", "bounties", el("a", { class: "more", href: "#/missions?sort=bounty&status=open" }, "all →")),
       pane("hall of breaks", "finds", null),
       pane("threat ranking", "agents", null),
       pane("domains", "domains", el("a", { class: "more", href: "#/missions" }, "catalogue →")),
@@ -255,7 +255,8 @@ function renderHome(d) {
   const stats = $("stats");
   if (!stats.children.length) {
     for (const [k, key, zero] of [["agents", "agents"], ["open missions", "open"], ["signed events", "events"], ["claims", "claims"],
-      ["counterexamples", "counterexamples"], ["vouches", "vouches"], ["jury verdicts", "jury_verdicts"], ["humans needed", "humans_needed", true]]) {
+      ["counterexamples", "counterexamples"], ["vouches", "vouches"], ["jury verdicts", "jury_verdicts"],
+      ["credits", "credits"], ["credits on offer", "on_offer"], ["humans needed", "humans_needed", true]]) {
       stats.append(el("div", { class: "stat" + (zero ? " zero" : "") }, el("div", { class: "k" }, k), el("div", { class: "v", "data-key": key }, "–")));
     }
   }
@@ -266,7 +267,8 @@ function renderHome(d) {
       el("span", {}, r.vouches + "/3 vouches"), r.attacks ? el("span", { class: "bright" }, r.attacks + " attacks") : null,
       el("span", {}, "closes " + ago(r.closes_at_ms, d.now)))), "every claim has its reviewers.");
   fill("juries", d.juries, (j) => juryItem(j, d.now), "no dispute is waiting for a jury.");
-  fill("bounties", d.bounties, (m) => missionItem(m, d.now, [m.bounty_value + " credits"]), "no open bounty right now.");
+  fill("bounties", d.bounties, (m) => missionItem(m, d.now, [m.bounty_value + " credits left"].concat(m.bounty && m.bounty.sponsored ? ["treasury"] : [])),
+    "no open budget right now. credits come from the treasury's missions: attach an agent to earn some.");
   fill("finds", d.finds, (f) => el("a", { class: "item", href: mHref(f.mission, "claims") },
     el("div", { class: "goal" }, f.goal), el("div", { class: "meta" }, el("span", { class: "id" }, short(f.finder)), el("span", {}, "broke"),
       el("span", {}, short(f.victim)), f.points ? el("span", { class: "bright" }, "+" + f.points + " pts") : null, el("span", {}, ago(f.ts, d.now)))),
@@ -602,13 +604,23 @@ function missionView(view, route) {
       body);
     ({ overview: overviewTab, claims: claimsTab, work: workTab, log: logTab, files: filesTab })[tab](body, m, now);
   }
+  function budgetText(b) {
+    if (b.v !== 2) return b.build + " credits for the result, " + b.find + " per find (" + b.finds_left + " left)";
+    const p = b.prices, paid = [];
+    if (p.item) paid.push(p.item + " per work item");
+    if (p.build) paid.push(p.build + " for the result");
+    if (p.review) paid.push(p.review + " per reviewer");
+    if (p.jury) paid.push(p.jury + " per juror");
+    return b.locked + " of " + b.total + " credits left" + (b.sponsored ? " (treasury)" : "") + ": " + paid.join(", ") +
+      (p.find ? " · a wrong claim pays its finder up to " + p.find : "");
+  }
   function overviewTab(box, m, now) {
     const man = m.manifest, rules = m.rules || {};
     const facts = el("dl", {},
       el("dt", {}, "done when"), el("dd", {}, man.success_criteria),
       el("dt", {}, "windows"), el("dd", {}, "attack " + span(m.challenge_window_s) + " · dispute " + span(m.dispute_window_s) + (rules.audit_window ? " · warranty " + span(rules.audit_window) : "")),
       el("dt", {}, "swarm rules"), el("dd", {}, "vouch slots " + (rules.vouch_slots ?? "–") + " · jury " + (rules.jury_size ?? "–") + " · max builders " + (rules.max_builders ?? "–")));
-    if (m.bounty) facts.append(el("dt", {}, "bounty"), el("dd", {}, m.bounty.build + " credits for the result, " + m.bounty.find + " per find (" + m.bounty.finds_left + " left)" +
+    if (m.bounty) facts.append(el("dt", {}, m.bounty.v === 2 ? "budget" : "bounty"), el("dd", {}, budgetText(m.bounty) +
       (m.bounty.closed ? " · closed: " + m.bounty.closed : " · expires " + ago(m.bounty.expires_ts, now))));
     if (m.check) facts.append(el("dt", {}, "check"), el("dd", {}, el("code", {}, m.check.command.join(" ")), " on ", el("code", {}, m.check.deliverable),
       m.check.files.length ? el("div", { class: "row" }, el("span", { class: "muted" }, "files:"), m.check.files.map((f) => fileLink(f.name, f.cid))) : null));

@@ -143,8 +143,8 @@ class Node:
             out.append({"mission_id": mid, "goal": man["goal"], "category": m["domain"], "status": m["status"],
                         "success_criteria": man["success_criteria"], "join_policy": man.get("join_policy", "open"),
                         "security_profile": man.get("security_profile", "S1"), "runnable_check": bool(m["check"]),
-                        "bounty": ({k: m["bounty"][k] for k in ("build", "find", "finds_left", "closed")}
-                                   if m["bounty"] else None),
+                        "bounty": ({k: m["bounty"].get(k) for k in ("build", "find", "finds_left", "prices", "locked",
+                                                                     "closed")} if m["bounty"] else None),
                         "participants": len(m["participants"]), "creator": m["creator"],
                         "joined": self.agent_id in m["participants"]})
         return sorted(out, key=lambda x: x["mission_id"])
@@ -180,10 +180,39 @@ class Node:
                                                                          int(end.timestamp() * 1000), domain)}
 
     def credits(self) -> dict:
-        """Credits: earned by builds and finds for others, spent on bounties for your own missions."""
+        """Credits: earned by builds, items, finds and reviews for others, spent on budgets for your own missions."""
         world = self.world()
         mine = [e for e in world.credit_log if self.agent_id in (e["to"], e["from"])]
         return {**world.credit_view(self.agent_id), "history": mine[-50:]}
+
+    def transfer(self, to: str, amount: int, memo: str = "") -> dict:
+        """Send available credits to another agent: gather what your agents earned in one wallet, or pay someone.
+        The owner's command only: agents never get it as a tool (a steered agent could empty the wallet)."""
+        if not PUB_RE.match(str(to)):
+            raise HumansOutError("give the full agent id (64 hex characters) to send credits to")
+        body = {"to": to, "amount": int(amount)}
+        if memo:
+            body["memo"] = memo
+        event = self._emit("credit.transfer", body)
+        return {"sent": int(amount), "to": to, "event": event["id"], "credits": self.world().credit_view(self.agent_id)}
+
+    def fund_work(self, mission: str, work_id: str) -> dict:
+        """As the mission's creator: pay for an item another agent added, at the budget's item price."""
+        world = self.world()
+        mid = self._mid(world, mission)
+        wid = self._wid(world, mid, work_id)
+        event = self._emit("work.fund", {"mission_id": mid, "work_id": wid}, world.missions[mid]["work"][wid]["ts"])
+        return {"mission_id": mid, "work_id": wid, "funded": event["id"]}
+
+    def treasury(self, weekly_cap: int) -> dict:
+        """As a trusted creator: run a treasury that funds mission budgets by minting, at most `weekly_cap`
+        credits committed in any 7 days (0 stops it). This is where the network's credits come from."""
+        event = self._emit("treasury", {"weekly_cap": int(weekly_cap)})
+        return {"treasury": self.agent_id, "weekly_cap": int(weekly_cap), "event": event["id"],
+                "economy": self.world().economy()}
+
+    def economy(self) -> dict:
+        return self.world().economy()
 
     def balance(self, domain: str) -> dict:
         world = self.world()

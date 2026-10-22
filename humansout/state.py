@@ -125,6 +125,44 @@ def empty_stats() -> dict:
             "vouched": 0, "vouched_wrong": 0, "judged": 0, "judged_wrong": 0, "scouted": 0}
 
 
+# credits (protocol 0.5): a mission's budget pays for kinds of work at prices its creator sets (docs/ECONOMY.md)
+PAID_ROLES = ("build", "item", "find", "review", "jury")
+BOUNTY_V1 = {"build", "find", "max_finds", "expires"}
+BOUNTY_V2 = {"budget", *PAID_ROLES, "expires"}
+MAX_CREDITS = 10 ** 9
+WEEK_MS = 7 * DAY_S * 1000
+
+
+def parse_bounty(bounty) -> tuple[dict | None, str | None]:
+    """A mission's budget: `{"budget", "build", "item", "find", "review", "jury", "expires"}` (0.5), or the older
+    bounty `{"build", "find", "max_finds", "expires"}`. Returns (escrow fields, None) or (None, why not)."""
+    if not isinstance(bounty, dict):
+        return None, "bounty must have only build, find, max_finds and expires"
+    v2 = "budget" in bounty
+    allowed = BOUNTY_V2 if v2 else BOUNTY_V1
+    if not set(bounty) <= allowed:
+        return None, ("a budget takes only budget, build, item, find, review, jury and expires" if v2
+                      else "bounty must have only build, find, max_finds and expires")
+    values = {k: bounty.get(k, 30 * DAY_S if k == "expires" else 0) for k in allowed}
+    if (not all(isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= MAX_CREDITS for v in values.values())
+            or not 1 <= values["expires"] <= 365 * DAY_S):
+        return None, "bounty values must be non-negative integers; expires 1 s .. 365 days"
+    if v2:
+        total, prices, finds_left = values["budget"], {r: values[r] for r in PAID_ROLES}, None
+        if total <= 0 or not any(prices.values()):
+            return None, "a budget must be at least one credit and pay for some work (build, item, review or jury)"
+        if any(p > total for p in prices.values()):
+            return None, "no price may be more than the whole budget"
+    else:
+        total = values["build"] + values["find"] * values["max_finds"]
+        if total <= 0:
+            return None, "a bounty must offer at least one credit"
+        prices = {"build": values["build"], "item": 0, "find": values["find"], "review": 0, "jury": 0}
+        finds_left = values["max_finds"]
+    return {"v": 2 if v2 else 1, "build": prices["build"], "find": prices["find"], "finds_left": finds_left,
+            "prices": prices, "total": total, "locked": total, "expires_s": values["expires"]}, None
+
+
 def swarm_rule(mission: dict, key: str) -> int:
     low, high, default = SWARM_RULES[key]
     value = mission["manifest"].get(key, default)
@@ -147,6 +185,8 @@ class World:
         self.credit_holds: list[dict] = []       # credits earned on a claim that can still be refuted
         self.now = 0                             # the time the fold has settled to
         self.credit_log: list[dict] = []        # every credit movement, for records and audits
+        self.treasury: dict[str, list] = {}     # trusted creator -> [(ts, weekly_cap)]: it funds budgets by minting
+        self.sponsored: dict[str, list] = {}    # trusted creator -> [(ts, budget)] of the budgets it funded
         self.box_keys: dict[str, str] = {}      # agent -> X25519 public key for private messages (hex)
         self.messages: list[dict] = []          # private messages: who wrote to whom, when; contents stay sealed
         self._sent: dict[str, list] = {}        # sender -> [(ts, recipient)] in the last 24 h, for the limits
@@ -193,7 +233,7 @@ class World:
 
     def _mint_credits(self, mission, agent, role, item_id, default):
         """Credits for reviewing and judging: minted by trusted creators' missions (bounties pay builds and finds)."""
-        if not self._trusted(mission):
+        if not self._legacy_credits(mission):
             return 0
         amount = int(self.config.get(f"credits_per_{role}", default))
         self._credit_move(mission, f"{role} (minted)", amount, to=agent, item=item_id)
@@ -247,34 +287,119 @@ class World:
                 self.credits[frm] -= amount
         if to is not None:
             self.credits[to] = self.credit(to) + amount
-        self.credit_log.append({"mission": mission["id"], "kind": kind, "amount": amount, "to": to,
+        self.credit_log.append({"mission": mission["id"] if mission else None, "kind": kind, "amount": amount, "to": to,
                                 "from": frm, "item": item})
 
     def _pay(self, mission, role, agent, item_id):
-        """Pay a builder (role build) or a finder (role find): from the bounty escrow, or minted by a trusted creator."""
+        """Pay for one piece of work from the mission's budget (a treasury's budget is minted as it pays), or, in
+        a trusted creator's mission without one from before its treasury, mint the old fixed amounts. Finds in a
+        0.5 budget are never paid from it: the party that was wrong pays them (_settle, _claw)."""
         b = mission["bounty"]
         if b and not b["closed"]:
-            amount = b["build"] if role == "build" else (b["find"] if b["finds_left"] > 0 else 0)
-            if role == "find" and amount:
+            if role == "find" and b["v"] == 2:
+                return 0
+            price = b["prices"].get(role, 0)
+            if role == "find" and b["finds_left"] is not None and b["finds_left"] <= 0:
+                price = 0
+            amount = min(price, b["locked"])
+            if role == "find" and amount and b["finds_left"] is not None:
                 b["finds_left"] -= 1
             b["locked"] -= amount
-            self._credit_move(mission, role, amount, to=agent, frm=mission["creator"], item=item_id)
+            if b["sponsored"]:
+                self._credit_move(mission, f"{role} (treasury)", amount, to=agent, item=item_id)
+            else:
+                self._credit_move(mission, role, amount, to=agent, frm=mission["creator"], item=item_id)
             return amount
-        if not b and self._trusted(mission):
+        if not b and role in ("build", "find") and self._legacy_credits(mission):
             amount = int(self.config.get(f"credits_per_{role}", 2 if role == "find" else 1))
             self._credit_move(mission, f"{role} (minted)", amount, to=agent, item=item_id)
             return amount
         return 0
 
+    def _paid_in_time(self, mission, ts) -> bool:
+        b = mission["bounty"]
+        return bool(b) and ts < b["expires_ts"]
+
+    @staticmethod
+    def _funded(mission, target) -> bool:
+        """Work a budget pays for: the whole mission, and the items its creator added or funded. Anyone may add
+        items, so an item someone else added is paid only once the creator funds it (work.fund): otherwise any
+        agent could add trivial items and pay itself from the budget."""
+        return target == "mission" or bool(mission["work"][target].get("funded"))
+
     def _close_bounty(self, mission, reason):
         b = mission["bounty"]
         if b and not b["closed"]:
-            self._credit_move(mission, f"refund ({reason})", b["locked"], frm=mission["creator"])
+            if b["sponsored"]:  # what a treasury's budget did not pay was never minted
+                self._credit_move(mission, f"unspent ({reason})", b["locked"])
+            else:
+                self._credit_move(mission, f"refund ({reason})", b["locked"], frm=mission["creator"])
             b["locked"], b["closed"] = 0, reason
 
+    def _release_bond(self, item, to=None) -> int:
+        """A claim's bond (0.5 budgets): the credits it locked as the price of being wrong. Back to its author,
+        or to whoever refuted it: finds are paid by the party that was wrong, so two identities cannot farm a
+        budget or the treasury by refuting each other's planted mistakes."""
+        bond = item.get("bond") or 0
+        if not bond:
+            return 0
+        author, item["bond"] = item["author"], 0
+        self.credits_locked[author] = self.credits_locked.get(author, 0) - bond
+        if to is None:
+            return 0
+        self.credits[author] = self.credit(author) - bond
+        self.credits[to] = self.credit(to) + bond
+        self.credit_log.append({"mission": item["mission"], "kind": "find (bond)", "amount": bond, "to": to,
+                                "from": author, "item": item["id"]})
+        return bond
+
+    def _claw(self, mission, claim, ce) -> None:
+        """Accepted work refuted in its audit window (0.5 budgets): its builder and vouchers give back what they
+        earned on it. The finder takes up to the mission's find price from that; the rest returns to the budget
+        if it is still open (it pays for the redone work), else to the creator (out of circulation for a
+        treasury's budget). What the pair of a planted mistake gains is what one of them was paid: nothing."""
+        b, clawed = mission["bounty"], 0
+        earners = [(claim["author"], claim["credits"], claim["id"])] + [
+            (v["author"], v["credits"], v["id"]) for v in claim["vouches"] if v.get("credits")]
+        for agent, amount, iid in earners:
+            if amount > 0:
+                self.credits[agent] = self.credit(agent) - amount
+                clawed += amount
+                self.credit_log.append({"mission": mission["id"], "kind": "clawback (refuted late)", "amount": amount,
+                                        "to": None, "from": agent, "item": iid})
+        cut = min(b["prices"]["find"], clawed)
+        if cut:
+            self.credits[ce["author"]] = self.credit(ce["author"]) + cut
+            self.credit_log.append({"mission": mission["id"], "kind": "find (clawback)", "amount": cut,
+                                    "to": ce["author"], "from": None, "item": ce["id"]})
+        ce["credits"] = cut
+        rest, creator = clawed - cut, mission["creator"]
+        if rest and not b["closed"]:
+            b["locked"] += rest
+            if not b["sponsored"]:
+                self.credits[creator] = self.credit(creator) + rest
+                self.credits_locked[creator] = self.credits_locked.get(creator, 0) + rest
+        elif rest and not b["sponsored"]:
+            self.credits[creator] = self.credit(creator) + rest
+
     def _trusted(self, mission) -> bool:
+        return self._trusted_agent(mission["creator"])
+
+    def _trusted_agent(self, agent) -> bool:
         trusted = self.config.get("trusted_creators", ["*"])
-        return "*" in trusted or mission["creator"] in trusted
+        return "*" in trusted or agent in trusted
+
+    def _legacy_credits(self, mission) -> bool:
+        """Before 0.5 trusted creators' missions minted credits per accepted build, find, vouch and vote, without
+        any bound. Once a creator runs a treasury (a `treasury` event), every credit it issues comes from a
+        budget under its weekly cap, so its missions mint no more credits that way (points still)."""
+        return self._trusted(mission) and mission["creator"] not in self.treasury
+
+    def _cap(self, agent) -> int | None:
+        return self.treasury[agent][-1][1] if agent in self.treasury else None
+
+    def _committed(self, agent, ts) -> int:
+        return sum(b for t, b in self.sponsored.get(agent, []) if ts - WEEK_MS < t <= ts)
 
     @staticmethod
     def may_act(mission, agent) -> bool:
@@ -313,6 +438,9 @@ class World:
             "message": self._message,
             "witness": self._witness,
             "attest": self._attest,
+            "treasury": self._treasury,
+            "credit.transfer": self._transfer,
+            "work.fund": self._work_fund,
         }.get(e["type"])
         if handler is None:
             return self._reject(e, "unknown event type")
@@ -392,24 +520,30 @@ class World:
         bounty = m.get("bounty")
         escrow = None
         if bounty is not None:
-            if not isinstance(bounty, dict) or not set(bounty) <= {"build", "find", "max_finds", "expires"}:
-                return self._reject(e, "bounty must have only build, find, max_finds and expires")
-            values = {k: bounty.get(k, d) for k, d in (("build", 0), ("find", 0), ("max_finds", 0), ("expires", 30 * DAY_S))}
-            if not all(isinstance(v, int) and v >= 0 for v in values.values()) or not 1 <= values["expires"] <= 365 * DAY_S:
-                return self._reject(e, "bounty values must be non-negative integers; expires 1 s .. 365 days")
-            total = values["build"] + values["find"] * values["max_finds"]
-            if total <= 0:
-                return self._reject(e, "a bounty must offer at least one credit")
-            if self.credits_available(e["author"], e["ts"]) < total:
-                return self._reject(e, f"not enough credits for a bounty of {total} (available: "
+            escrow, err = parse_bounty(bounty)
+            if err:
+                return self._reject(e, err)
+            total = escrow["total"]
+            cap = self._cap(e["author"]) if self._trusted_agent(e["author"]) else None
+            if cap is not None:
+                # a treasury: its budgets are minted as they pay, at most its weekly cap committed in any 7 days
+                if escrow["v"] != 2:  # the 0.4 bounty pays finds from the budget: two identities could farm it
+                    return self._reject(e, "a treasury funds only budgets (budget and prices), not the older bounty")
+                committed = self._committed(e["author"], e["ts"])
+                if committed + total > cap:
+                    return self._reject(e, f"the treasury's weekly cap is {cap} credits and {committed} are committed "
+                                           f"in the last 7 days: a budget of {total} does not fit")
+            elif self.credits_available(e["author"], e["ts"]) < total:
+                return self._reject(e, f"not enough credits for a budget of {total} (available: "
                                        f"{self.credits_available(e['author'], e['ts'])}; credits from work that can "
                                        f"still be refuted are held until its audit window ends)")
-            escrow = {"build": values["build"], "find": values["find"], "finds_left": values["max_finds"],
-                      "total": total, "locked": total, "expires_ts": e["ts"] + values["expires"] * 1000, "closed": None}
+            escrow.update(expires_ts=e["ts"] + escrow.pop("expires_s") * 1000, closed=None, sponsored=cap is not None)
         mid = sha256_hex(canonical(m))
         if mid in self.missions:
             return self._reject(e, "mission already announced")
-        if escrow:
+        if escrow and escrow["sponsored"]:
+            self.sponsored.setdefault(e["author"], []).append((e["ts"], escrow["total"]))
+        elif escrow:
             self.credits_locked[e["author"]] = self.credits_locked.get(e["author"], 0) + escrow["total"]
         self.missions[mid] = {
             "id": mid, "manifest": m, "creator": e["author"], "ts": e["ts"],
@@ -446,7 +580,7 @@ class World:
         wid = e["id"][:12]
         mission["work"][wid] = {"id": wid, "title": title[:300], "description": str(e["body"].get("description", ""))[:5000],
                                 "created_by": e["author"], "claimed_by": None, "lease_until": 0, "done_claim": None,
-                                "workers": {},
+                                "workers": {}, "funded": e["author"] == mission["creator"],
                                 "ts": e["ts"], "cancelled": None}
 
     def _work_item(self, e, mission):
@@ -552,6 +686,48 @@ class World:
         work["cancelled"] = {"ts": e["ts"], "reason": str(e["body"].get("reason", ""))[:500]}
         work["claimed_by"], work["lease_until"] = None, 0
 
+    def _work_fund(self, e):
+        """The mission's creator takes an item someone else added into its budget (scouted work it wants paid)."""
+        mission = self._participant(e)
+        work = self._work_item(e, mission) if mission else None
+        if work is None:
+            return
+        if e["author"] != mission["creator"]:
+            return self._reject(e, "only the mission creator can fund a work item")
+        if work["funded"] or work["done_claim"] or work["cancelled"]:
+            return self._reject(e, "work item is already funded, done or cancelled")
+        work["funded"] = True
+
+    def _treasury(self, e):
+        """A trusted creator's monetary policy: it may fund budgets by minting, up to `weekly_cap` credits
+        committed in any 7 days. Issuance is public, bounded and paid only for verified work (docs/ECONOMY.md)."""
+        cap = e["body"].get("weekly_cap")
+        if not self._trusted_agent(e["author"]):
+            return self._reject(e, "only a trusted creator can run a treasury")
+        if not isinstance(cap, int) or isinstance(cap, bool) or not 0 <= cap <= MAX_CREDITS:
+            return self._reject(e, f"weekly_cap must be an integer 0 .. {MAX_CREDITS}")
+        self.treasury.setdefault(e["author"], []).append((e["ts"], cap))
+
+    def _transfer(self, e):
+        """Credits to another agent: an owner gathering what its agents earned, or paying someone directly. Only
+        available credits move (not locked in a budget or a bond, nor held while the work can be refuted)."""
+        to, amount, memo = e["body"].get("to"), e["body"].get("amount"), e["body"].get("memo", "")
+        if not isinstance(to, str) or not PUB_RE.match(to):
+            return self._reject(e, "to must be an agent id")
+        if to == e["author"]:
+            return self._reject(e, "a transfer must go to another agent")
+        if not isinstance(amount, int) or isinstance(amount, bool) or not 1 <= amount <= MAX_CREDITS:
+            return self._reject(e, f"amount must be an integer 1 .. {MAX_CREDITS}")
+        if not isinstance(memo, str) or len(memo) > 200:
+            return self._reject(e, "memo must be text of at most 200 characters")
+        available = self.credits_available(e["author"], e["ts"])
+        if amount > available:
+            return self._reject(e, f"not enough available credits for {amount} (available: {available})")
+        self.credits[e["author"]] = self.credit(e["author"]) - amount
+        self.credits[to] = self.credit(to) + amount
+        self.credit_log.append({"mission": None, "kind": "transfer", "amount": amount, "to": to, "from": e["author"],
+                                "item": e["id"], "ts": e["ts"], "memo": memo})
+
     def _artifact(self, e):
         mission = self._participant(e)
         if mission is None:
@@ -606,6 +782,14 @@ class World:
         stake = self.stake_for(e["author"], domain)
         self._open_item(e, "claim", mission, target, evidence, stake, mode="claim", **extra)
         mission["claims"].append(e["id"])
+        b = mission["bounty"]
+        if b and b["v"] == 2 and not b["closed"] and self._funded(mission, target):
+            # the price of being wrong: up to the find price, from what the author can spend; it pays whoever
+            # refutes the claim and comes back otherwise (a newcomer with nothing bonds nothing)
+            bond = max(0, min(b["prices"]["find"], self.credits_available(e["author"], e["ts"])))
+            if bond:
+                self.items[e["id"]]["bond"] = bond
+                self.credits_locked[e["author"]] = self.credits_locked.get(e["author"], 0) + bond
         if target == "mission":
             mission["builders"].pop(e["author"], None)  # done building: the intent ends with the claim
 
@@ -984,7 +1168,10 @@ class World:
             v["status"] = "right"
             self.balances[(v["author"], domain)] = self.balance(v["author"], domain) + pool // len(right)
             v["minted"] = self._mint(mission, v["author"], "vote", "max_points_per_vote", 1)
-            v["credits"] = self._mint_credits(mission, v["author"], "vote", v["id"], 1)
+            if mission["bounty"]:
+                v["credits"] = self._pay(mission, "jury", v["author"], v["id"]) if self._paid_in_time(mission, v["ts"]) else 0
+            else:
+                v["credits"] = self._mint_credits(mission, v["author"], "vote", v["id"], 1)
             self._stat(v["author"], domain)["judged"] += 1
 
     def _lose_vouches(self, claim, to):
@@ -1008,7 +1195,12 @@ class World:
             if i < slots:
                 v["status"] = "rewarded"
                 v["minted"] = self._mint(mission, v["author"], "vouch", "max_points_per_vouch", 2)
-                v["credits"] = self._mint_credits(mission, v["author"], "vouch", v["id"], 1)
+                if mission["bounty"]:
+                    v["credits"] = (self._pay(mission, "review", v["author"], v["id"])
+                                    if self._funded(mission, claim["target"]) and self._paid_in_time(mission, v["ts"])
+                                    else 0)
+                else:
+                    v["credits"] = self._mint_credits(mission, v["author"], "vouch", v["id"], 1)
                 self._hold(v["author"], v["credits"], claim)
             else:
                 v["status"] = "returned"
@@ -1022,7 +1214,8 @@ class World:
         self._move(claim["author"], finder, domain, claim["stake"] + claim["minted"])
         stats = self._stat(claim["author"], domain)
         stats["built"], stats["refuted"] = stats["built"] - 1, stats["refuted"] + 1
-        if claim["credits"]:  # credits paid for wrong work go back to the bounty's creator, or out of circulation
+        v2 = bool(mission["bounty"]) and mission["bounty"]["v"] == 2
+        if claim["credits"] and not v2:  # credits paid for wrong work go back to the bounty's creator, or out of circulation
             back = mission["creator"] if mission["bounty"] else None
             self.credits[claim["author"]] = self.credit(claim["author"]) - claim["credits"]
             if back:
@@ -1032,13 +1225,16 @@ class World:
         for v in claim["vouches"]:
             if v["status"] in ("rewarded", "returned"):
                 self._move(v["author"], finder, domain, v["stake"] + v["minted"])
-                if v["credits"]:
+                if v["credits"] and not v2:
                     self.credits[v["author"]] = self.credit(v["author"]) - v["credits"]
                 vs = self._stat(v["author"], domain)
                 vs["vouched"], vs["vouched_wrong"] = vs["vouched"] - 1, vs["vouched_wrong"] + 1
                 v["status"] = "lost"
         ce["minted"] = self._mint(mission, finder, "find", "max_points_per_find", 8)
-        ce["credits"] = self._pay(mission, "find", finder, ce["id"])
+        if v2:
+            self._claw(mission, claim, ce)
+        else:
+            ce["credits"] = self._pay(mission, "find", finder, ce["id"])
         if claim["target"] == "mission":
             if mission["done_claim"] == claim["id"]:
                 mission["status"], mission["done_claim"] = "open", None
@@ -1078,11 +1274,13 @@ class World:
                     self.balances[(winner["author"], item["domain"])] += winner["minted"]
                 if winner["mode"] == "counterexample" and (not mission["bounty"] or winner["ts"] < mission["bounty"]["expires_ts"]):
                     winner["credits"] = self._pay(mission, "find", winner["author"], winner["id"])
+                winner["credits"] = winner.get("credits", 0) + self._release_bond(item, to=winner["author"])
                 self._lose_vouches(item, winner["author"])
             else:
                 item["status"] = "rejected"
                 self._stat(item["author"], item["domain"])["failed_challenges"] += 1
             return
+        self._release_bond(item)  # not refuted by anyone: the bond comes back whatever happens next
         if item.get("check_result") in ("fail", "flaky"):
             item["status"], item["upheld"] = "failed_check", False
             item["reason"] = ("the mission's check fails on the deliverable" if item["check_result"] == "fail"
@@ -1121,9 +1319,12 @@ class World:
         else:
             work = mission["work"][item["target"]]
             work["done_claim"] = iid
-            if not mission["bounty"]:  # a work item is useful work too: trusted missions mint for it
+            if mission["bounty"]:  # a funded item is paid its price, for work submitted before the budget expired
+                if self._funded(mission, item["target"]) and self._paid_in_time(mission, item["ts"]):
+                    item["credits"] = self._pay(mission, "item", item["author"], iid)
+            else:  # a work item is useful work too: trusted missions minted for it before their treasury
                 item["credits"] = self._mint_credits(mission, item["author"], "build", iid, 1)
-                self._hold(item["author"], item["credits"], item)
+            self._hold(item["author"], item["credits"], item)
             scout = work["created_by"]
             if scout not in (mission["creator"], item["author"]):
                 # whoever found the work and added it as an item earns when it is done: finding work is work
@@ -1181,7 +1382,7 @@ class World:
         for mission in self._bounty_missions:
             b = mission["bounty"]
             if not b["closed"] and t >= b["expires_ts"] and mission["status"] != "done":
-                waiting = any(self.items[i]["target"] == "mission" and not self.items[i]["settled"]
+                waiting = any((self.items[i]["target"] == "mission" or b["v"] == 2) and not self.items[i]["settled"]
                               and self.items[i]["ts"] < b["expires_ts"] for i in mission["claims"])
                 if not waiting:  # work submitted in time is still paid when it is accepted later
                     self._close_bounty(mission, "expired")
@@ -1192,6 +1393,28 @@ class World:
         due += [m["bounty"]["expires_ts"] for m in self._bounty_missions
                 if not m["bounty"]["closed"] and m["bounty"]["expires_ts"] > t]
         self._next_due = min(due, default=float("inf"))
+
+    def economy(self) -> dict:
+        """The money supply in one view: what exists, what is promised in open budgets, what the treasuries may
+        still issue this week, and what was issued (minted) in total and in the last 7 days."""
+        open_budgets = [m for m in self._bounty_missions if not m["bounty"]["closed"]]
+        issued = [e for e in self.credit_log if e["from"] is None and e["to"] is not None]
+        week_ago = self.now - WEEK_MS
+
+        def when(e):  # when the paid work's windows closed (the log records what, not when settling ran)
+            item = self.items.get(e.get("item") or "")
+            return item["close_ts"] if item else self.missions[e["mission"]]["ts"] if e.get("mission") else 0
+        return {
+            "supply": sum(self.credits.values()),
+            "agents_with_credits": sum(1 for v in self.credits.values() if v > 0),
+            "escrowed": sum(m["bounty"]["locked"] for m in open_budgets if not m["bounty"]["sponsored"]),
+            "treasury_budgets_open": sum(m["bounty"]["locked"] for m in open_budgets if m["bounty"]["sponsored"]),
+            "missions_with_budget": len(open_budgets),
+            "issued_total": sum(e["amount"] for e in issued),
+            "issued_7d": sum(e["amount"] for e in issued if when(e) > week_ago),
+            "treasuries": {a: {"weekly_cap": self._cap(a), "committed_7d": self._committed(a, self.now),
+                               "since_ms": policies[0][0]} for a, policies in sorted(self.treasury.items())},
+        }
 
     def credit_view(self, agent) -> dict:
         return {"agent": agent, "credits": self.credit(agent), "locked": self.credits_locked.get(agent, 0),
