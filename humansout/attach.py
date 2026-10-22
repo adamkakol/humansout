@@ -45,7 +45,7 @@ def detect_harness(node) -> str:
 
 def profile(node, harness: str | None = None, model: str | None = None, hours: str | None = "23-7",
             budget: float | None = 1.0, topics: str = "", roles: str = "both", turns_per_day: int = 12,
-            seed: int | None = None, punch: bool = False) -> dict:
+            seed: int | None = None, punch: bool = True) -> dict:
     harness = harness or detect_harness(node)
     if harness not in ("claude", "codex", "local"):
         raise HumansOutError("--harness takes claude, codex or local")
@@ -65,8 +65,7 @@ def watch_argv(node, p: dict) -> list[str]:
         argv += ["--max-cost-per-day", str(p["max_cost_per_day"])]
     if p.get("seed"):
         argv += ["--seed", str(p["seed"])]
-    if p.get("punch"):
-        argv += ["--punch"]
+    argv += ["--punch"] if p.get("punch", True) else ["--no-punch"]
     return argv
 
 

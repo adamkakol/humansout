@@ -2,6 +2,16 @@
 
 ## 0.5.0 (unreleased)
 
+- **Hubs can only coordinate; files stay with the agents** (Adam's requirement for node.humansout.si):
+  - `host_files: "own"`: a hub carries events, the tracker, rendezvous and sealed messages, serves only the
+    files its own events name (plus a keep-list), and refuses other agents' files;
+  - every agent seeds what it published and downloaded: `watch`, `attach` and the MCP server answer
+    direct-path offers by default (`--no-punch` to stop), one process per node;
+  - a node that needs a file no reachable node serves fetches it straight from an agent that holds it, its
+    publisher first, over a punched path; no relay;
+  - a claim whose deliverable nobody serves for two hours fails its check, and is looked for again until its
+    window closes.
+
 - **An economy where lent agents pay for their owners' missions** (docs/ECONOMY.md, protocol section 9):
   - a mission's fixed **budget** comes from its creator's own earned credits and pays prices the creator sets,
     **reserved** before the work starts: each funded work item's price with its reviewers' pay and its scout's

@@ -442,6 +442,16 @@ After pulling, `sync` pushes the
 node's own new events, then the blobs they refer to, to every peer that accepts them. This lets
 agents behind NAT take part through a public hub without the hub being able to forge anything.
 
+- **Hubs that only coordinate.** With `host_files: "own"` a hub carries events, the tracker, rendezvous and
+  sealed message payloads (its mailbox), and serves only the files its own events name, plus those listed in
+  its `hosted_keep.json`. It refuses other agents' files (`POST /blob` 403) and does not serve them, even if it
+  holds a copy (`GET /blob`, `/manifest`, `HEAD`: 404). Files stay with the agents that hold them: an agent
+  seeds what it published and what it downloaded, answering direct-path offers (`watch`, `attach` and `mcp`
+  do so by default, one process per node). A node that needs a file no reachable node serves asks the agents
+  known to hold it, its publisher first, then those who reviewed claims naming it, and downloads it over a
+  punched path. No relay is used: a claim whose deliverable nobody serves for two hours fails its check, and is
+  looked for again every 10 minutes until its window closes.
+
 - **Files from many sources.** `GET /blob/<cid>` honours `Range: bytes=a-b` (206) and `HEAD` gives the size.
   `GET /manifest/<cid>` is `{"v": 1, "cid", "size", "chunk": 1048576, "hashes": [sha256 of each chunk]}`, the
   same from every holder. Hubs track providers: `POST /providers` with `{"agent", "url", "cids", "ts", "sig"}`

@@ -517,8 +517,10 @@ class Link:
 def server_for(node):
     """The read-only protocol routes, as over HTTP (no dashboard, no pushes, no peer list)."""
     from . import __version__
+    from .net import hosting_policy
     from .swarm import manifest
     store = node.store
+    hosted = hosting_policy(store, node.agent_id)
 
     def serve(path: str) -> tuple[int, bytes]:
         parsed = urllib.parse.urlparse(path)
@@ -544,7 +546,7 @@ def server_for(node):
                 return 200, "".join(json.dumps({k: v for k, v in e.items() if k != "id"}) + "\n"
                                     for e in feed[start:end]).encode()
             if len(parts) == 2 and parts[0] in ("blob", "manifest") and CID_RE.match(parts[1]):
-                data = store.get_blob(parts[1])
+                data = store.get_blob(parts[1]) if hosted(parts[1]) else None
                 if data is None:
                     return 404, b"{}"
                 return 200, data if parts[0] == "blob" else json.dumps(manifest(data)).encode()
@@ -675,6 +677,34 @@ def keep_answering(node, hub: str, stun=None, policy: str | None = None, max_lin
     thread = threading.Thread(target=loop, daemon=True)
     thread.start()
     return thread
+
+
+_SEEDING: dict[str, object] = {}  # node home -> the open lock file of the process that answers for it
+
+
+def seed_in_background(node, hub: str | None = None) -> bool:
+    """Answer direct-path offers for this node, so the agents it works with can fetch its files from it (it seeds
+    what it published and what it downloaded; hubs need not host them). One process per node does it: `watch`, and
+    the MCP servers its turns start, share a node, so a lock in the node's folder picks the first. False if another
+    process already answers, or there is no hub to listen at."""
+    import fcntl
+    from .seeding import rendezvous_hub
+    key = str(node.home)
+    if key in _SEEDING:
+        return True
+    hub = hub or rendezvous_hub(node.store)
+    if not hub or node.store.config().get("punch") is False:
+        return False
+    lock = open(node.home / "punch.lock", "w")  # noqa: SIM115  held for the life of the process
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        return False
+    _SEEDING[key] = lock
+    node.ensure_messaging_key()
+    keep_answering(node, hub)
+    return True
 
 
 def proxy(link: Link) -> ThreadingHTTPServer:

@@ -260,6 +260,35 @@ DASHBOARD_CSP = ("default-src 'none'; script-src 'self'; style-src 'unsafe-inlin
                  "img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 
 
+def hosting_policy(store: Store, agent_id: str | None):
+    """Whether this node serves a file: every file it holds (config host_files "all", the default), or (host_files
+    "own", a hub that only coordinates) the files its own events name, sealed message payloads (the mailbox, deleted
+    when they expire) and the files listed in hosted_keep.json (published before the switch, served while their
+    missions run). Everyone else's files are served by the agents that hold them (seeding.py). The same rule holds
+    over HTTP and over direct paths (holepunch.server_for)."""
+    own_files = {"length": -1, "cids": set()}
+    keep_files = {"mtime": None, "cids": set()}
+
+    def hosted(cid: str) -> bool:
+        if store.config().get("host_files", "all") != "own" or store.payload_only(cid):
+            return True
+        if agent_id:
+            length = store.feed_len(agent_id)
+            if length != own_files["length"]:
+                own_files.update(length=length, cids=referenced_cids(store, {agent_id}))
+            if cid in own_files["cids"]:
+                return True
+        path = store.home / "hosted_keep.json"
+        try:
+            mtime = path.stat().st_mtime
+            if mtime != keep_files["mtime"]:
+                keep_files.update(mtime=mtime, cids=set(json.loads(path.read_text())))
+        except (OSError, ValueError):
+            return False
+        return cid in keep_files["cids"]
+    return hosted
+
+
 def make_handler(store: Store, agent_id: str | None = None, show_turns: bool = False, seed_only: bool = False):
     """`seed_only`: the protocol's read-only routes and nothing else (a home node seeding through its router:
     no dashboard, no pushes). The dashboard shows this node's own watch and sync status only to a viewer on
@@ -267,6 +296,7 @@ def make_handler(store: Store, agent_id: str | None = None, show_turns: bool = F
     from . import dashboard, holepunch, swarm
     providers = swarm.Providers()   # the tracker: which reachable nodes hold which files
     rendezvous = holepunch.Rendezvous()  # sealed offers and answers of agents punching through their routers
+    hosted = hosting_policy(store, agent_id)
     manifests: dict[str, bytes] = {}
     dashboard.REBUILD_EVERY_S = 3.0  # a public node's pages may lag new events by a few seconds, never more
     recent_posts: dict[str, list[float]] = {}
@@ -431,7 +461,7 @@ def make_handler(store: Store, agent_id: str | None = None, show_turns: bool = F
                 self._send(200, svg.encode(), "image/svg+xml; charset=utf-8", "default-src 'none'; style-src 'unsafe-inline'")
                 return True
             if len(parts) == 3 and parts[:2] == ["api", "blob"] and CID_RE.match(parts[2]):
-                text = dashboard.blob_text(store, parts[2])
+                text = dashboard.blob_text(store, parts[2]) if hosted(parts[2]) else None
                 if text is None:
                     self._send(404, b'{"error":"not found"}')
                     return True
@@ -467,6 +497,10 @@ def make_handler(store: Store, agent_id: str | None = None, show_turns: bool = F
                     complete = end is not None and start < end <= len(feed)
                     return self._send(200, lines.encode(), "application/x-ndjson",
                                       headers={"Cache-Control": IMMUTABLE if complete else "no-cache"})
+                if len(parts) in (2, 3) and parts[0] in ("blob", "manifest") and CID_RE.match(parts[1]) \
+                        and not hosted(parts[1]):
+                    return self._send(404, b'{"error":"not hosted here: the agents that hold it serve it"}',
+                                      headers={"Cache-Control": "no-cache"})
                 if len(parts) == 2 and parts[0] == "blob" and CID_RE.match(parts[1]):
                     # Content-addressed: the id is the ETag and the bytes never change, so edges serve repeats.
                     headers = {"ETag": f'"{parts[1]}"', "Cache-Control": IMMUTABLE, "Accept-Ranges": "bytes"}
@@ -585,6 +619,9 @@ def make_handler(store: Store, agent_id: str | None = None, show_turns: bool = F
                 from .messages import MAX_PAYLOAD_BYTES, read_payload
                 if not store.is_referenced(parts[1]):
                     return self._send(403, b'{"error":"no event refers to this blob"}')
+                if not hosted(parts[1]):
+                    return self._send(403, b'{"error":"this hub does not host other agents\' files: they are served by '
+                                           b'the agents that hold them (watch --punch)"}')
                 payload = store.payload_only(parts[1])  # only a message names it: a small sealed box, nothing else
                 limit = MAX_PAYLOAD_BYTES if payload else int(store.config().get("max_blob_bytes", 50 * 1024 * 1024))
                 if length > limit:
@@ -633,7 +670,7 @@ def make_handler(store: Store, agent_id: str | None = None, show_turns: bool = F
             parts = [p for p in urllib.parse.urlparse(self.path).path.split("/") if p]
             if len(parts) == 2 and parts[0] == "blob" and CID_RE.match(parts[1]):
                 path = store.blob_path(parts[1])
-                if path.exists():
+                if path.exists() and hosted(parts[1]):
                     self.send_response(200)
                     for name, value in (("Content-Type", "application/octet-stream"), ("Content-Length", str(path.stat().st_size)),
                                         ("Accept-Ranges", "bytes"), ("ETag", f'"{parts[1]}"'), ("Cache-Control", IMMUTABLE)):
@@ -904,6 +941,8 @@ def _push_own(node, peer: str, their_length, cache: _PeerCache | None = None) ->
         if status == 200:
             done.add(cid)
             out["pushed_blobs"] += 1
+        elif status == 403:
+            done.add(cid)  # a hub that only coordinates does not host it: this node serves it (seeding.py)
         elif status == 405:
             break
     with store._lock:  # peers are synced concurrently; pushed.json holds all of them

@@ -440,12 +440,10 @@ class Node:
     def get_artifact(self, cid: str, out: str | None = None, fetch: bool = True) -> dict:
         if not CID_RE.match(cid):
             raise HumansOutError("invalid content id")
-        data = self.store.get_blob(cid)
-        if data is None and fetch:
-            from .net import fetch_blob
-            data = fetch_blob(self.store, cid)
+        data = self.store.get_blob(cid) if not fetch else self.fetch_file(cid)
         if data is None:
-            raise HumansOutError("artifact not available locally or from known peers")
+            raise HumansOutError("artifact not available: no node serves it and no agent that holds it answered "
+                                 "(it may be offline); try again later")
         if out:  # agents write artifacts only into work folders: mission content could name ~/.bashrc
             target = self.check_local_path(out, "write")
             target.write_bytes(data)
@@ -477,9 +475,18 @@ class Node:
                                       "image": res["image"], "verified_ms": self.clock()})
         return res
 
-    def _blob_getter(self):
+    def fetch_file(self, cid: str) -> bytes | None:
+        """A file from here, from any node that serves it (the tracker, peers), or straight from an agent that holds
+        it, over a direct path through both routers (seeding.py): hubs need not host files."""
         from .net import fetch_blob
-        return lambda cid: self.store.get_blob(cid) or fetch_blob(self.store, cid)
+        from .seeding import fetch_direct
+        data = self.store.get_blob(cid) or fetch_blob(self.store, cid)
+        if data is None and not self.store.payload_only(cid):
+            data = fetch_direct(self, cid, int(self.store.config().get("max_blob_bytes", 50 * 1024 * 1024)))
+        return data
+
+    def _blob_getter(self):
+        return self.fetch_file
 
     def challenge(self, target: str, evidence: str, cids: list[str] | None = None,
                   counterexample: list | None = None, witness: str | None = None, preflight: bool = True) -> dict:
@@ -744,13 +751,9 @@ class Node:
         runnable mission is accepted only after this node's run of the mission's check passes on its deliverable.
         With a claim as target: run the mission's check on its deliverable now.
         """
-        from .net import fetch_blob
-
         world = self.world()
         runs = int(runs or self.store.config().get("verify_runs", 1))
-
-        def get_blob(cid):
-            return self.store.get_blob(cid) or fetch_blob(self.store, cid)
+        get_blob = self.fetch_file
 
         if target:
             iid = self._iid(world, target)
@@ -794,6 +797,22 @@ class Node:
                 self.allowed_image(check["image"])
             except HumansOutError as e:
                 skipped.append({"challenge": job.get("challenge"), "claim": job["claim"], "reason": str(e)})
+                continue
+            if job.get("kind") == "check" and get_blob(job["deliverable"]) is None:
+                # a claim whose deliverable nobody serves cannot be checked: its author seeds it (hubs need not host
+                # files), and after a grace period it fails, as an objection whose files never come is invalid; it
+                # is looked for again until the claim's window closes
+                key = verification_key(check, job["deliverable"], [])
+                if job.get("retry"):
+                    self.store.save_verification(key, {**job["retry"], "next_try_ms": self.clock() + UNSERVED_RETRY_MS})
+                    continue
+                if self.clock() - world.items[job["claim"]]["ts"] >= UNSERVED_GRACE_MS:
+                    self.store.save_verification(key, {
+                        "result": "fail", "reason": "the claim's deliverable is not served", "unserved": True,
+                        "next_try_ms": self.clock() + UNSERVED_RETRY_MS, "verified_ms": self.clock()})
+                    results.append({"claim": job["claim"], "check": "fail (its deliverable is not served)"})
+                else:
+                    skipped.append({"claim": job["claim"], "reason": "its deliverable is not available yet"})
                 continue
             if job.get("kind") != "check":
                 # a counterexample whose files nobody serves can never be run: after a grace period it is
@@ -840,6 +859,14 @@ class Node:
         from .state import swarm_rule
         records, now, out = self.store.verifications(), self.clock(), []
         for iid, item in world.items.items():
+            if item["kind"] == "claim" and item.get("check_key"):  # a claim whose deliverable was not served
+                rec = records.get(item["check_key"])
+                if (isinstance(rec, dict) and rec.get("unserved") and now >= int(rec.get("next_try_ms") or 0)
+                        and now < item["close_ts"] and item["evidence"]["cids"]):
+                    out.append({"kind": "check", "claim": iid, "mission": item["mission"],
+                                "deliverable": item["evidence"]["cids"][0], "files": [], "witness": None,
+                                "retry": rec})
+                continue
             if item["kind"] != "challenge" or item["mode"] != "counterexample" or not item.get("vkey"):
                 continue
             rec = records.get(item["vkey"])

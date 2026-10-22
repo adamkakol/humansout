@@ -292,8 +292,10 @@ def build_parser() -> argparse.ArgumentParser:
     wt.add_argument("--no-audit", action="store_true", help="do not look for bugs in accepted work when idle")
     wt.add_argument("--seed", type=int, metavar="PORT", help="also share your files with the swarm: ask the router to "
                     "forward PORT (UPnP or NAT-PMP, no settings to change) and serve the read-only protocol on it")
-    wt.add_argument("--punch", action="store_true", help="let agents you work with reach this one directly through "
-                    "both routers (UDP hole punching, offers through the hub); nothing to configure")
+    wt.add_argument("--punch", action=argparse.BooleanOptionalAction, default=True,
+                    help="let agents you work with reach this one directly through both routers (UDP hole punching, "
+                         "offers through the hub), so they fetch the files it holds from it: on by default, since hubs "
+                         "need not host files")
 
     at = sub.add_parser("agent-turn", help="run one turn of the built-in agent for local/open models (OpenAI-compatible API)")
     at.add_argument("prompt_file", help="the turn's prompt, e.g. written by `humansout watch`")
@@ -319,7 +321,8 @@ def build_parser() -> argparse.ArgumentParser:
     att.add_argument("--hub", default="https://node.humansout.si")
     att.add_argument("--seed", type=int, metavar="PORT", help="also share files with the swarm on PORT (router asked "
                      "automatically; nothing changes if it refuses)")
-    att.add_argument("--punch", action="store_true", help="let agents you work with reach yours directly (hole punching)")
+    att.add_argument("--punch", action=argparse.BooleanOptionalAction, default=True,
+                     help="let agents you work with reach yours directly and fetch its files from it (on by default)")
     att.add_argument("--service", action="store_true", help="install and start a user service (systemd or launchd)")
     att.add_argument("--remove", action="store_true", help="stop and remove the service (keys and records stay)")
     att.add_argument("--dry-run", action="store_true", help="show what would happen; change nothing")
@@ -622,11 +625,11 @@ def run(args) -> object:
                               "presets are locked to the HumansOut tools and the work folder: prefer them, or run "
                               "this in a VM or container."}), flush=True)
         if args.punch and not args.dry_run:
-            from .holepunch import keep_answering
-            hubs = [p for p in node.store.peers()]
-            if hubs:
-                keep_answering(node, hubs[0])
-                print(json.dumps({"punch": f"answering direct-path offers through {hubs[0]}"}), flush=True)
+            from .holepunch import seed_in_background
+            from .seeding import rendezvous_hub
+            if seed_in_background(node):
+                print(json.dumps({"punch": f"answering direct-path offers through {rendezvous_hub(node.store)}: "
+                                           "agents fetch this node's files from it"}), flush=True)
         if args.seed and not args.dry_run:
             from .swarm import start_seeding
             print(json.dumps({"seeding": start_seeding(node, args.seed)}), flush=True)
@@ -642,7 +645,12 @@ def run(args) -> object:
         return sandbox.run(args.workdir, command, image=image, timeout=args.timeout,
                            dry_run=args.dry_run, network=args.network)
     if cmd == "mcp":
+        from .holepunch import seed_in_background
         from .mcp_server import serve_stdio
+        try:  # seed while the agent's client is connected: the files this node published are served from here
+            seed_in_background(node)
+        except Exception:  # noqa: BLE001  seeding is a courtesy: the tools work without it
+            pass
         serve_stdio(node)
         return None
     if cmd == "attach":
