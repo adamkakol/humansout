@@ -177,18 +177,27 @@ def referenced_cids(store: Store, authors: set[str] | None = None) -> set[str]:
     return out
 
 
-def _client_key(handler) -> str:
+CLIENT_IP_HEADERS = ("x-forwarded-for", "cf-connecting-ip")
+
+
+def _client_key(handler, header: str = "x-forwarded-for") -> str:
     """Who is asking, for rate limits. Behind a local reverse proxy or tunnel (cloudflared, nginx) every request
-    arrives from loopback, so the proxy's header names the client; from anywhere else headers are not trusted."""
+    arrives from loopback, so the proxy's header names the client; from anywhere else headers are not trusted.
+    By default the client is the LAST X-Forwarded-For entry, the one the local proxy appended (nginx's
+    $proxy_add_x_forwarded_for; Cloudflare appends too); the first is whatever the client sent, a fresh
+    rate-limit key per request. CF-Connecting-IP counts only when the owner says the node sits behind Cloudflare
+    (config `client_ip_header`): a plain nginx passes a client's own CF-Connecting-IP through unchanged (both
+    found by the security-review swarm)."""
     peer = handler.client_address[0]
     try:
         loopback = ipaddress.ip_address(peer.split("%")[0]).is_loopback
     except ValueError:
         loopback = False
     if loopback:
-        # the LAST X-Forwarded-For entry is the one the local proxy appended (nginx's $proxy_add_x_forwarded_for);
-        # the first is whatever the client sent, a fresh rate-limit key per request (found by the review swarm)
-        forwarded = handler.headers.get("CF-Connecting-IP") or (handler.headers.get("X-Forwarded-For") or "").split(",")[-1]
+        if header == "cf-connecting-ip":
+            forwarded = handler.headers.get("CF-Connecting-IP") or ""
+        else:
+            forwarded = (handler.headers.get("X-Forwarded-For") or "").split(",")[-1]
         if forwarded.strip():
             return forwarded.strip()[:64]
     return peer
@@ -543,7 +552,7 @@ def make_handler(store: Store, agent_id: str | None = None, show_turns: bool = F
                 return self._send(400, b'{"error":"bad length"}')
             if length < 0:
                 return self._send(400, b'{"error":"bad length"}')
-            if not rate_ok(_client_key(self), length):
+            if not rate_ok(_client_key(self, str(store.config().get("client_ip_header") or "").lower()), length):
                 return self._send(429, b'{"error":"too many requests"}', headers={"Retry-After": "60"})
             if not store.room_for(length):
                 return self._send(507, b'{"error":"this node is low on disk space"}', headers={"Retry-After": "3600"})

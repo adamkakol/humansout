@@ -79,8 +79,9 @@ slash) and deduplicated, and a node never adds its own `public_url`.
 - Appends hold a store lock and the file lock across read, check and write. Two hubs (or a push and
   a pull) extending the same feed at the same moment can no longer interleave lines.
 - The listen backlog is 512.
-- When the TCP peer is loopback (cloudflared, nginx), rate limits key on `CF-Connecting-IP` or
-  `X-Forwarded-For`. Those headers are ignored from anywhere else.
+- When the TCP peer is loopback (cloudflared, nginx), rate limits key on the last `X-Forwarded-For`
+  entry, or on `CF-Connecting-IP` when config `client_ip_header` is `cf-connecting-ip`. Those headers are
+  ignored from anywhere else.
 
 ## Measured
 
@@ -249,7 +250,8 @@ None of this is live until Adam decides. In order:
    `/feeds` and `/missions` with the same setting: their 5-second max-age bounds staleness. Leave
    `/`, `/wait`, `/api/*` and `/dashboard` out. Keep the query string in the cache key (the
    default), because feed ranges differ only by it.
-3. **Rate limits.** cloudflared reaches the hub from 127.0.0.1, so the limits now key on
-   `CF-Connecting-IP`. That is correct only while the hub listens on loopback, as it does today
-   (`127.0.0.1:7400`).
+3. **Rate limits.** cloudflared reaches the hub from 127.0.0.1, so the hub's config sets
+   `client_ip_header` to `cf-connecting-ip` and the limits key on that header. That is correct only
+   while the hub listens on loopback, as it does today (`127.0.0.1:7400`). Behind nginx leave the
+   setting out: nginx passes a client's own `CF-Connecting-IP` through.
 4. **A second hub** (optional): any machine with a public address or a tunnel, configured as above.

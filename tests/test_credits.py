@@ -107,16 +107,18 @@ def test_earn_then_spend_on_a_bounty(net):
     clock, n, tmp, test = net
     for node in n.values():
         node.store.set_config("credits_per_build", 10)
-    faucet = runnable(n["faucet"], test)
+    faucet = runnable(n["faucet"], test, rules={"audit_window": 0})  # refutable only in its windows
     share(*n.values())
     build(n, "alice", faucet, tmp, "faucet-work")
     share(*n.values())
     clock.advance(101)
     assert credits(n["alice"], n["alice"])["credits"] == 10
+    clock.advance(106)  # past the window a last objection would need to resolve: the credits are free
 
     mid = runnable(n["alice"], test, bounty={"build": 6, "find": 2, "max_finds": 2})
     share(*n.values())
-    assert credits(n["bob"], n["alice"]) == {"agent": n["alice"].agent_id, "credits": 10, "locked": 10, "available": 0}
+    assert credits(n["bob"], n["alice"]) == {"agent": n["alice"].agent_id, "credits": 10, "locked": 10, "held": 0,
+                                             "available": 0}
     first = build(n, "bob", mid, tmp, "v1")
     share(*n.values())
     clock.advance(1)
@@ -132,7 +134,8 @@ def test_earn_then_spend_on_a_bounty(net):
     assert world.missions[mid]["status"] == "done"
     assert world.items[second]["credits"] == 6
     assert credits(n["faucet"], n["bob"])["credits"] == 6
-    assert credits(n["faucet"], n["alice"]) == {"agent": n["alice"].agent_id, "credits": 2, "locked": 0, "available": 2}
+    assert credits(n["faucet"], n["alice"]) == {"agent": n["alice"].agent_id, "credits": 2, "locked": 0, "held": 0,
+                                                "available": 2}
     assert world.missions[mid]["bounty"]["closed"] == "done"
     kinds = [e["kind"] for e in world.credit_log if e["mission"] == mid]
     assert kinds == ["find", "build", "refund (done)"]
@@ -212,3 +215,23 @@ def test_report_measures_time_to_first_credit_and_holds_nothing_private(net, cap
         assert private not in text
     assert main(["--home", str(n["alice"].home), "report", "--markdown"]) == 0
     assert "minutes to first credit" in capsys.readouterr().out
+
+
+def test_credits_from_refutable_work_cannot_be_spent_yet(net):
+    """Found by the security-review swarm (round 3): credits from an accepted claim could be spent on a bounty at
+    once, and a second identity collected them before a refutation in the audit window clawed them back."""
+    clock, n, tmp, test = net
+    for node in n.values():
+        node.store.set_config("credits_per_build", 10)
+    faucet = runnable(n["faucet"], test, rules={"audit_window": 3600})
+    share(*n.values())
+    build(n, "alice", faucet, tmp, "faucet-work")
+    share(*n.values())
+    clock.advance(101)
+    view = credits(n["alice"], n["alice"])
+    assert view["credits"] == 10 and view["held"] == 10 and view["available"] == 0
+    with pytest.raises(HumansOutError, match="held until its audit window ends"):
+        runnable(n["alice"], test, bounty={"build": 6})
+    clock.advance(3600 + 106)  # the audit window and a last objection's windows are over
+    assert credits(n["alice"], n["alice"])["available"] == 10
+    runnable(n["alice"], test, bounty={"build": 6})

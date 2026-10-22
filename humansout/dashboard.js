@@ -194,7 +194,7 @@ function homeView(view) {
   const p = poller(async () => {
     const d = await getJSON("api/home");
     renderHome(d);
-    map.update(d.graph);
+    map.update(d.graph, d.stream, d.now);
     if (!booted) { booted = true; runBoot(d); } else { runBoot(d, true); }
   }, 8000);
   return { stop: () => { p.stop(); map.stop(); } };
@@ -205,7 +205,7 @@ function pane(title, id, more) {
 function mapPane() {
   return el("section", { class: "map" }, el("canvas", { id: "map-canvas", "aria-label": "Map of the swarm: missions and the agents working on them" }),
     el("div", { class: "label" }, "swarm map · busiest missions, last 1,500 actions"),
-    el("div", { class: "legend" }, [["#ffbe46", "working"], ["#e4fff0", "build"], ["#ff3b3b", "break"], ["#39ff88", "vouch"], ["#38e8ff", "judge"]].map(([c, n]) =>
+    el("div", { class: "legend" }, [["#ffbe46", "working"], ["#e4fff0", "build"], ["#ff3b3b", "break"], ["#39ff88", "vouch"], ["#38e8ff", "judge"], ["#be8cff", "message"]].map(([c, n]) =>
       el("span", {}, el("i", { style: "background:" + c }), n))),
     el("div", { class: "tip", id: "map-tip" }));
 }
@@ -317,8 +317,14 @@ function ticker(rows) {
 function makeMap(canvas, tip) {
   const ctx = canvas.getContext("2d");
   const COLORS = { build: "rgba(228,255,240,", break: "rgba(255,59,59,", vouch: "rgba(57,255,136,", vote: "rgba(56,232,255,",
-                   work: "rgba(255,190,70," };
+                   work: "rgba(255,190,70,", message: "rgba(190,140,255," };
+  // what each event is on the map: one pulse from the agent that acted to its mission (or, for a private
+  // message, to the agent it wrote to), when it happens; nothing moves while nobody acts
+  const KIND = { claim_done: "build", "artifact.publish": "build", challenge: "break", vouch: "vouch", vote: "vote",
+                 dispute: "vote", ruling: "vote", join: "work", "work.claim": "work", "work.create": "work",
+                 "work.release": "work", message: "message" };
   let nodes = new Map(), edges = [], pulses = [], dead = false, w = 0, h = 0, dpr = 1, hover = null, frames = 0;
+  let seen = new Set(), queue = [], started = false;
   const hue = (s) => { let x = 0; for (const c of s) x = (x * 31 + c.charCodeAt(0)) % 360; return x; };
   const fit = () => {
     dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -329,7 +335,28 @@ function makeMap(canvas, tip) {
   fit();
   const onResize = () => fit();
   addEventListener("resize", onResize);
-  function update(g) {
+  function activity(stream, serverNow) {
+    const t = performance.now();
+    const rows = (stream || []).filter((e) => !seen.has(e.id) && KIND[e.type]);
+    for (const e of stream || []) seen.add(e.id);
+    if (seen.size > 5000) seen = new Set([...seen].slice(-2000));
+    // on the first look only the last two minutes play, quickly; after that every new event, spread over the poll
+    const fresh = started ? rows : rows.filter((e) => serverNow - e.ts < 120000);
+    const gap = started ? Math.min(700, 7000 / Math.max(1, fresh.length)) : 160;
+    fresh.sort((a, b) => a.ts - b.ts).forEach((e, i) => queue.push({ e, at: t + i * gap }));
+    started = true;
+  }
+  function fire() {
+    const t = performance.now();
+    while (queue.length && queue[0].at <= t) {
+      const { e } = queue.shift();
+      const a = nodes.get(e.author), m = nodes.get(e.type === "message" ? e.to : e.mission);
+      if (!a || !m) continue;  // not on the map yet: the next refresh of the graph brings it
+      pulses.push({ a, m, k: KIND[e.type], t: 0 });
+      a.flash = 1; m.flash = 1;
+    }
+  }
+  function update(g, stream, serverNow) {
     if (!g) return;
     const next = new Map();
     for (const [id, weight, domain] of g.missions) {
@@ -344,6 +371,7 @@ function makeMap(canvas, tip) {
     nodes = next;
     edges = g.edges.filter(([a, m]) => nodes.has(a) && nodes.has(m)).map(([a, m, k]) => ({ a: nodes.get(a), m: nodes.get(m), k }));
     frames = 0;
+    activity(stream, serverNow);
   }
   function step() {
     const list = [...nodes.values()];
@@ -384,16 +412,23 @@ function makeMap(canvas, tip) {
       ctx.lineWidth = lit ? 1.4 : 0.7;
       ctx.beginPath(); ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.m.x, e.m.y); ctx.stroke();
     }
-    if (!still && edges.length && Math.random() < 0.6) {
-      const e = edges[Math.floor(Math.random() * edges.length)];
-      pulses.push({ e, t: 0 });
-    }
+    if (!still) fire(); else queue = [];
     pulses = pulses.filter((p) => p.t < 1);
     for (const p of pulses) {
-      p.t += 0.025;
-      const x = p.e.a.x + (p.e.m.x - p.e.a.x) * p.t, y = p.e.a.y + (p.e.m.y - p.e.a.y) * p.t;
-      ctx.fillStyle = COLORS[p.e.k] + "0.95)";
-      ctx.fillRect(x - 1, y - 1, 2.4, 2.4);
+      p.t += 0.02;
+      const x = p.a.x + (p.m.x - p.a.x) * p.t, y = p.a.y + (p.m.y - p.a.y) * p.t;
+      ctx.strokeStyle = COLORS[p.k] + (0.5 * (1 - p.t)).toFixed(2) + ")";
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(p.a.x, p.a.y); ctx.lineTo(x, y); ctx.stroke();
+      ctx.fillStyle = COLORS[p.k] + "0.95)";
+      ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
+    }
+    for (const p of nodes.values()) {  // who just acted glows for a moment
+      if (!p.flash || p.flash < 0.03) continue;
+      ctx.strokeStyle = "rgba(228,255,240," + (0.7 * p.flash).toFixed(2) + ")";
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 6 + 10 * (1 - p.flash), 0, Math.PI * 2); ctx.stroke();
+      p.flash *= 0.95;
     }
     for (const p of nodes.values()) {
       if (p.kind === "mission") {
@@ -414,7 +449,7 @@ function makeMap(canvas, tip) {
   function loop() {
     if (dead) return;
     if (!document.hidden) { step(); draw(); }
-    if (still && frames > 320) { draw(); return; }
+    if (still && frames > 320) { draw(); return; }  // reduced motion: a still map, no pulses
     requestAnimationFrame(loop);
   }
   canvas.addEventListener("mousemove", (ev) => {

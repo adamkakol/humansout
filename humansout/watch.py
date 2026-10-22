@@ -292,10 +292,17 @@ def find_work(world, me: str, now: int, cfg: WatchConfig, state: dict, node_mess
                     # no limit on reviewers: the prompt says who reviews it and what is left to earn; agents choose
                     pays = bounty_value(m, "find")
                     if pays >= cfg.min_bounty:
+                        # its natural reviewers: every agent ranks the other participants by a hash of the claim and
+                        # their ids, and the first vouch_slots of them review it before building; the rest build
+                        # first (round 3 of the security review: four agents reviewed one claim in the same second)
+                        others = sorted((a for a in m["participants"] if a not in (c["author"], m["creator"])),
+                                        key=lambda a: _spread(a, c["id"]))
+                        natural = me not in others or others.index(me) < max(1, slots)
                         review.append(Event("review", mid, c["id"], {"cid": (c["evidence"]["cids"] or [None])[0],
                                                                      "bounty": pays,
                                                                      "slots_left": max(0, slots - len(c["vouches"])),
-                                                                     "spread": _spread(me, c["id"])}))
+                                                                     "spread": _spread(me, c["id"]),
+                                                                     "natural": natural}))
         if "build" in cfg.roles and not mine_creator:
             mine = [c for c in claims if c["author"] == me]
             assigned = None
@@ -318,7 +325,14 @@ def find_work(world, me: str, now: int, cfg: WatchConfig, state: dict, node_mess
                 # and since when, and the agent judges its chance to be first with a correct result
             pays = bounty_value(m, "build")
             if _may_try(state, mid, now, cfg) and pays >= cfg.min_bounty:
-                build.append(Event("build", mid, None, {"bounty": pays,
+                # how likely this agent is to be first with a correct result there: work where another agent's claim
+                # already passes its check is offered after work nobody has won yet (found in round 3 of the
+                # security review: agents started in old missions' contested items, in plain mission order)
+                target = assigned["id"] if assigned else "mission"
+                odds = (len(_strong_claims(world, m, target, me)),
+                        len(_live_workers(assigned, now, me)) if assigned else
+                        len([a for a, until in m["builders"].items() if until > now and a != me]))
+                build.append(Event("build", mid, None, {"bounty": pays, "odds": odds,
                                                         **({"suggested": assigned["id"]} if assigned else {})}))
     inbox = []
     if cfg.messages and node_messages is not None:
@@ -327,9 +341,11 @@ def find_work(world, me: str, now: int, cfg: WatchConfig, state: dict, node_mess
             inbox.append(Event("inbox", "inbox", None, {"count": len(fresh), "ids": fresh}))  # not about one mission
     # better-paying work first; claims with vouch slots left before those without; otherwise the order found
     review.sort(key=lambda e: (-e.detail["bounty"], -e.detail["slots_left"], e.detail["spread"]))
-    build.sort(key=lambda e: -e.detail["bounty"])
+    build.sort(key=lambda e: (-e.detail["bounty"], e.detail["odds"]))
     audit.sort(key=lambda e: -e.detail["bounty"])
-    return ruling + jury + respond + inbox + review + build + audit
+    first = [e for e in review if e.detail["natural"]]
+    later = [e for e in review if not e.detail["natural"]]  # still offered: after this agent's build work
+    return ruling + jury + respond + inbox + first + build + later + audit
 
 
 def budget_left(state: dict, now: int, cfg: WatchConfig, urgent: bool = False) -> bool:

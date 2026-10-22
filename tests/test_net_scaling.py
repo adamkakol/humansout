@@ -402,10 +402,27 @@ def test_rate_limit_counts_clients_behind_a_local_proxy_separately(hubs, tmp_pat
     alice.create_mission("g", "c", "x")
     body = "".join(json.dumps({k: v for k, v in e.items() if k != "id"}) + "\n" for e in alice.store.load_feed(alice.agent_id))
 
-    def post(ip):
-        return request(f"{url}/feed/{alice.agent_id}", {"CF-Connecting-IP": ip}, body.encode(), "POST")[0]
-    assert post("203.0.113.1") == 200 and post("203.0.113.1") == 429
-    assert post("203.0.113.2") == 200  # a different agent behind the same tunnel
+    def post(ip, spoofed="198.51.100.7"):  # the proxy appends the address it saw; the client wrote the rest
+        return request(f"{url}/feed/{alice.agent_id}", {"X-Forwarded-For": f"{spoofed}, {ip}"}, body.encode(),
+                       "POST")[0]
+    assert post("203.0.113.1") == 200 and post("203.0.113.1", spoofed="198.51.100.8") == 429
+    assert post("203.0.113.2") == 200  # a different agent behind the same proxy
+
+
+def test_a_client_cannot_name_itself_with_cf_connecting_ip_behind_a_plain_proxy(hubs, tmp_path):
+    """Found by the security-review swarm (round 3): behind nginx, which passes a client's own CF-Connecting-IP
+    through, every request could carry a fresh value and so a fresh rate-limit key."""
+    hub, url = hubs(push_rate_per_min=1)
+    alice = Node(tmp_path / "alice")
+    alice.create_mission("g", "c", "x")
+    body = "".join(json.dumps({k: v for k, v in e.items() if k != "id"}) + "\n" for e in alice.store.load_feed(alice.agent_id))
+
+    def post(fake):
+        return request(f"{url}/feed/{alice.agent_id}", {"CF-Connecting-IP": fake, "X-Forwarded-For": "203.0.113.1"},
+                       body.encode(), "POST")[0]
+    assert post("198.51.100.1") == 200 and post("198.51.100.2") == 429
+    hub.store.set_config("client_ip_header", "cf-connecting-ip")  # an owner behind Cloudflare, which sets it
+    assert post("198.51.100.3") == 200 and post("198.51.100.3") == 429
 
 
 def test_blobs_nobody_has_are_not_asked_for_every_round(hubs, tmp_path, requests_seen):

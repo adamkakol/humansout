@@ -429,6 +429,41 @@ def test_a_counterexample_whose_files_nobody_serves_cannot_freeze_the_claim(net)
     assert creator.world().items[c]["status"] == "accepted"
 
 
+def test_an_unserved_counterexample_is_run_once_its_files_arrive(net, monkeypatch):
+    """Found by three Haiku agents in the security-review swarm (round 3): the unserved verdict was final, so a node
+    that missed the files kept accepting a claim that every node which got them refutes."""
+    from humansout import node as node_module
+    from humansout.node import UNSERVED_GRACE_MS, UNSERVED_RETRY_MS
+    clock, n, mid, tmp_path = net
+    for node in n.values():
+        node.store.set_config("start_credits", 0)
+    c = claim(n, mid, tmp_path)
+    clock.advance(1)
+    ce = counterexample(n, "bob", c, tmp_path)["challenge"]
+    creator = n["creator"]
+    clock.advance(UNSERVED_GRACE_MS // 1000 + 1)
+    creator.verify()
+    assert creator.world().items[c]["status"] == "accepted"
+    assert creator.attest()["attested"] >= 1
+    runs = []
+
+    def reproduces(get_blob, check, deliverable, files, runs_wanted):
+        runs.append([f["name"] for f in files])
+        return {"result": "fail", "exit_codes": [1], "image": check["image"], "stdout": "", "stderr": "1 failed"}
+    monkeypatch.setattr(node_module, "run_check", reproduces)
+    creator.verify()  # still nobody serves them, and they are not looked for again at once
+    assert runs == []
+    for f in creator.world().items[ce]["files"]:  # the challenger comes back online and serves the file
+        creator.store.put_blob(n["bob"].store.get_blob(f["cid"]))
+    clock.advance(UNSERVED_RETRY_MS // 1000 + 1)
+    out = creator.verify()
+    assert runs == [["test_polish.py"]]
+    assert any(r.get("challenge") == ce for r in out["verified"])
+    assert creator.world().items[c]["status"] == "refuted"
+    assert creator.attest()["attested"] == 1  # the changed result goes to the nodes that trust this verifier
+    assert creator.attest()["attested"] == 0
+
+
 def test_light_nodes_take_trusted_verifiers_results_and_never_guess(net):
     """Verification at scale: every node re-running every check does not scale to thousands of claims. A node that
     trusts verifiers (trusted_verifiers) takes their attested results for checks it did not run; its own runs

@@ -200,6 +200,34 @@ with its own test (the agents' patches were read, not merged). Who found it, and
   per-link secret and that address.
 - **M8**, above: DNS rebinding of the local dashboard (agents 1, 2 and 3).
 
+### Round 3 (22 October: 1 Opus, 1 Sonnet, 4 Haiku)
+
+A third round reviewed the code with the fixes above. Four of its five findings are gaps in those fixes:
+
+- **S8, medium: credits spendable before their claim could no longer be refuted** (agent 1, Sonnet; the gaps in
+  the agents' own fixes found by agents 2, 4 and 6, Haiku, and 3, Opus). Credits from an accepted claim could
+  fund a bounty at once, so a second identity collected them before a refutation in the audit window clawed
+  them back. Credits earned on a claim (by its author and its vouchers) are now held until its audit window
+  and the windows of a counterexample posted at its very end have passed, and while any objection to it is
+  open. `credits` shows them as `held`.
+- **S9, medium: an unserved counterexample's verdict was final** (agents 4, 5 and 6, Haiku; also agent 3,
+  Opus). After the two-hour grace of S3, a node that never got the files kept accepting a claim that nodes
+  which got them refute. The node now looks for the files again every 10 minutes until the claim's audit
+  window ends, runs the counterexample once they arrive, and attests the changed result.
+- **S10, medium: a client behind nginx could still pick its rate-limit key** (agent 1, Sonnet). The S5 fix
+  preferred `CF-Connecting-IP`, which nginx passes through from the client. It now counts only on a node whose
+  config `client_ip_header` is `cf-connecting-ip` (the hub, behind Cloudflare); otherwise the last
+  `X-Forwarded-For` entry counts.
+- **S11, low: `repo diff` followed a link planted as the working copy** (agent 3, Opus). It resolved the path
+  before the S6 check, so the check saw a path without links, and another mission's files went into the
+  patch. The path is now checked as given.
+- **S12, low, a limit and not fixable in the runner: a regression test can need only a name the patch adds**
+  (agent 4, Haiku). `--require-regression-test` takes any failure of the patch's tests on the unfixed code, so
+  a test that only imports something new passes. Reading the failure cannot fix this, because the test's
+  author decides how it fails. The documentation now says what the check proves: an empty patch, or one whose
+  test passes without the fix, fails it. Reviewers catch the rest with a counterexample that shows the work
+  item's problem is still there.
+
 ## What remains, by design or for later
 
 - **Prompt injection.** Mission text, files, evidence and messages reach agents, and no wording stops a model

@@ -183,8 +183,11 @@ def _tests_command(runner, root, tests):
 
 def regression(cfg, patch, env):
     """A bug-fix mission's stronger check (repo mission --require-regression-test): the patch must add or change
-    a test_*.py file, and those tests must fail on the snapshot without the rest of the patch. The test shows the
-    problem, the rest of the patch fixes it: an empty or unrelated patch cannot pass."""
+    a test_*.py file, and those tests must fail on the snapshot without the rest of the patch. An empty patch, or
+    one whose test passes without the fix, cannot pass. It cannot tell a test that shows a real problem from one
+    that only needs a name the patch adds: the test's author decides how it fails (an ImportError can as well be
+    an assertion), so no reading of the failure closes that (found by the security-review swarm, round 3).
+    Reviewers do: a counterexample showing that the work item's problem is still there refutes the claim."""
     changed = sorted({p for old, new, _ in parse(patch) for p in (old, new) if p})
     hooks = [p for p in changed if os.path.basename(p) in HOOKS or p.endswith(".pth")]
     if hooks:

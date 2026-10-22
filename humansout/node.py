@@ -23,6 +23,7 @@ from .verify import LABELS, run_check, verification_key
 
 
 UNSERVED_GRACE_MS = 2 * 3600 * 1000  # a counterexample's files unavailable this long: recorded as invalid
+UNSERVED_RETRY_MS = 10 * 60 * 1000  # and then looked for again this often, until its claim's audit window ends
 
 
 def default_home() -> Path:
@@ -689,7 +690,7 @@ class Node:
             jobs = [{"challenge": iid, "claim": claim["id"], "mission": item["mission"],
                      "deliverable": claim["evidence"]["cids"][0], "files": item["files"], "witness": item["witness"]}]
         else:
-            jobs = world.pending_verifications()
+            jobs = world.pending_verifications() + self._unserved_retries(world)
 
         results, skipped = [], []
         for job in jobs:
@@ -705,9 +706,16 @@ class Node:
                 own = [f["cid"] for f in job["files"]] + ([job["witness"]] if job.get("witness") else [])
                 if any(get_blob(c) is None for c in own):
                     age = self.clock() - world.items[job["challenge"]]["ts"]
+                    key = verification_key(check, job["deliverable"], job["files"])
+                    if job.get("retry"):
+                        self.store.save_verification(key, {**job["retry"], "next_try_ms": self.clock() + UNSERVED_RETRY_MS})
+                        continue
                     if age >= UNSERVED_GRACE_MS:
-                        self.store.save_verification(verification_key(check, job["deliverable"], job["files"]), {
+                        # not final: once the files turn up it is run after all (_unserved_retries), so this node
+                        # does not keep accepting a claim that the nodes which got the files refute
+                        self.store.save_verification(key, {
                             "result": "invalid", "reason": "the counterexample's files are not served",
+                            "unserved": True, "next_try_ms": self.clock() + UNSERVED_RETRY_MS,
                             "verified_ms": self.clock()})
                         results.append({"challenge": job["challenge"], "claim": job["claim"],
                                         "counterexample": "invalid (its files are not served)"})
@@ -729,23 +737,52 @@ class Node:
                 r["claim_signal"] = claim.get("verification_status")
         return {"verified": results, "remaining": len(after.pending_verifications()), "skipped": skipped}
 
+    def _unserved_retries(self, world) -> list[dict]:
+        """Counterexamples recorded invalid only because their files were not served: looked for again every
+        UNSERVED_RETRY_MS and run once they arrive, until the claim's audit window ends. Before, that verdict was
+        final, so a node that missed the files kept a claim that nodes which got them refute (found by the
+        security-review swarm, round 3). The credits the claim earns are held at least that long (state.py)."""
+        from .state import swarm_rule
+        records, now, out = self.store.verifications(), self.clock(), []
+        for iid, item in world.items.items():
+            if item["kind"] != "challenge" or item["mode"] != "counterexample" or not item.get("vkey"):
+                continue
+            rec = records.get(item["vkey"])
+            if not isinstance(rec, dict) or now < int(rec.get("next_try_ms") or 0) or not (
+                    rec.get("unserved") or rec.get("reason") == "the counterexample's files are not served"):
+                continue
+            claim, mission = world.items[item["target"]], world.missions[item["mission"]]
+            if claim.get("close_ts") is not None and now >= claim["close_ts"] + swarm_rule(mission, "audit_window") * 1000:
+                continue
+            out.append({"challenge": iid, "claim": claim["id"], "mission": item["mission"],
+                        "deliverable": claim["evidence"]["cids"][0], "files": item["files"], "witness": item["witness"],
+                        "retry": rec})
+        return out
+
     def attest(self) -> dict:
         """Publish this node's check results that it has not attested yet, for nodes that trust it as a verifier
         (config trusted_verifiers): they then follow missions without re-running every check themselves."""
         from .state import ATTEST_RESULTS, MAX_ATTESTED
         path = self.home / "attested.json"
         try:
-            done = set(json.loads(path.read_text()))
+            done = json.loads(path.read_text())
         except (OSError, ValueError):
-            done = set()
-        fresh = {k: v["result"] for k, v in sorted(self.store.verifications().items())
-                 if isinstance(v, dict) and v.get("result") in ATTEST_RESULTS and k not in done}
+            done = {}
+        records = self.store.verifications()
+        if isinstance(done, list):  # before 0.4.2 the keys only: taken as attested with the result they have now
+            done = {k: (records.get(k) or {}).get("result") for k in done if isinstance(k, str)}
+        # a result that changed is attested again (an unserved counterexample run once its files arrived): a
+        # verifier's later attestation replaces its earlier one on the nodes that trust it
+        fresh = {}
+        for k, v in sorted(records.items()):
+            if isinstance(v, dict) and v.get("result") in ATTEST_RESULTS and done.get(k) != v["result"]:
+                fresh[k] = v["result"]
         keys = list(fresh)
         for i in range(0, len(keys), MAX_ATTESTED):
             chunk = {k: fresh[k] for k in keys[i:i + MAX_ATTESTED]}
             self.store.append_own(self.identity, "attest", {"results": chunk}, self.clock())
             done.update(chunk)
-        path.write_text(json.dumps(sorted(done)))
+        path.write_text(json.dumps(done, sort_keys=True))
         return {"attested": len(keys)}
 
     def _verify_job(self, job: dict, check: dict, runs: int, get_blob) -> dict:

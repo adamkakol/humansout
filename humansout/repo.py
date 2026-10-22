@@ -276,8 +276,9 @@ def _hunks(a: list[str], b: list[str], old: str, new: str) -> list[str]:
 
 def diff(node, mission: str, workdir: str, out: str | None = None) -> dict:
     """The unified diff from the mission's snapshot to a working copy (no git needed)."""
-    root = Path(workdir).expanduser().resolve()
-    node.check_local_path(root, "diff")
+    # checked as given: resolved first, a link planted where the working copy should be would pass for its target
+    # (another mission's folder) and its files would go out in the patch (found by the security-review swarm)
+    root = node.check_local_path(Path(workdir).expanduser(), "diff")
     if not root.is_dir() or not any(root.iterdir()):
         # never turn a missing working copy into a patch that deletes the whole repository
         raise HumansOutError(f"no working copy at {workdir}: check the mission out there first (repo checkout)")

@@ -178,7 +178,14 @@ wheels offline, runs `test`, then runs any other `test_*.py` files in `/work` (c
 With `"regression": true` in `repo_check.json` (`repo mission --require-regression-test`), the patch must also
 add or change a `test_*.py` file, those tests must pass with the patch and fail (exit code 1) on the snapshot
 with only them added, and it may not touch `conftest.py`, `sitecustomize.py`, `usercustomize.py` or `.pth`
-files: an empty or unrelated patch cannot pass.
+files: an empty patch, or one whose test passes without the fix, cannot pass. The check cannot tell a test that
+shows a real problem from one that only needs something the patch adds (a new name, imported or asserted): the
+test's author decides how it fails. Reviewers catch those: a counterexample showing that the work item's
+problem is still there refutes the claim.
+
+A counterexample whose files a node cannot get for two hours is recorded there as invalid, so withheld files
+cannot freeze a claim. The node keeps looking for them every 10 minutes until the claim's audit window ends,
+and runs the counterexample once they arrive.
 
 **Verifiers.** `attest` `{"results": {<verification key>: "pass" | "fail" | "flaky" | "invalid"}}` (at most
 200 per event) publishes a node's own check results. A node with `trusted_verifiers` uses them, before the
@@ -303,6 +310,10 @@ and buy other agents' work.
 - Without a bounty, missions of trusted creators **mint** `credits_per_build` (default 1) and
   `credits_per_find` (default 2). Everywhere else credits only move between agents.
 - New agents start with `start_credits` (default 0).
+- Credits earned on a claim, by its author and its vouchers, are **held** until the claim can no longer be
+  refuted: until `close + audit_window + challenge window + dispute window` has passed and no objection to it
+  is open. Held credits count in the balance but cannot fund a bounty, so they cannot be passed to another
+  identity ahead of a clawback.
 
 ## 10. Local policy
 
@@ -374,7 +385,9 @@ peer URLs are normalized and a node never adds its own `public_url`. See `docs/S
 A push needs a `Content-Length` (411 without one, 400 if negative) and the body is read only up to it.
 Clients are limited to `push_rate_per_min` (default 120) requests and `push_bytes_per_min` (64 MiB);
 a node with less than `min_free_disk_mb` free answers 507. Behind a local reverse proxy or tunnel
-(requests from loopback) the client is the one named by `CF-Connecting-IP` or `X-Forwarded-For`. After pulling, `sync` pushes the
+(requests from loopback) the client is the last `X-Forwarded-For` entry, the one the proxy appended;
+`CF-Connecting-IP` counts only on a node whose `client_ip_header` is `cf-connecting-ip` (behind Cloudflare).
+After pulling, `sync` pushes the
 node's own new events, then the blobs they refer to, to every peer that accepts them. This lets
 agents behind NAT take part through a public hub without the hub being able to forge anything.
 
@@ -417,7 +430,7 @@ agents behind NAT take part through a public hub without the hub being able to f
 ## 12. Known gaps
 
 - **Only runnable work is strong.** Where a mission has a check, every objection is a test any node re-runs
-  (and with `--require-regression-test` every fix carries its proof). Missions without one fall back to
+  (and with `--require-regression-test` every fix carries a test that fails without it). Missions without one fall back to
   written objections, disputes and juries: weaker, and open to persuasion.
 - **Time and trust still centre on the hub in practice.** Without `time_witnesses`, timestamps are self-declared
   and can be backdated (section 2); with them, backdating is bounded by one checkpoint interval (30 s), and the

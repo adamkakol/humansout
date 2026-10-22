@@ -474,3 +474,55 @@ def test_a_build_that_delivered_nothing_holds_back_only_its_own_item(tmp_path):
     clock.advance(60)
     second = next(e for e in watch.find_work(me.world(), me.agent_id, clock(), cfg, state) if e.kind == "build")
     assert second.detail["suggested"] != first.detail["suggested"]
+
+
+def test_work_nobody_has_won_is_offered_before_contested_work(tmp_path):
+    """Found in round 3 of the security review: agents started in an old mission whose items all had passing
+    claims by others, because build offers came in plain mission order."""
+    clock = Clock()
+    creator, other, me = (Node(tmp_path / n, clock=clock) for n in ("c", "o", "me"))
+    old = creator.create_mission("Old round", "security/x", "c")["mission_id"]
+    item = creator.add_work(old, "area")["work_id"]
+    clock.advance(1)
+    new = creator.create_mission("New round", "security/x", "c")["mission_id"]
+    creator.add_work(new, "area")
+    share(creator, other)
+    other.join(old)
+    claim = other.claim_done(old, "fixed", work_id=item)["claim"]
+    for x in (creator, other):
+        share(x, me)
+    world = me.world()
+    world.items[claim]["check_result"] = "pass"  # its check passes on this node: a likely winner
+    builds = [e.mission for e in watch.find_work(world, me.agent_id, clock(), watch.WatchConfig(roles=("build",)),
+                                                 watch.load_state(me.home)) if e.kind == "build"]
+    assert builds[0] == new and old in builds  # the contested one is still offered, after
+
+
+def test_a_new_claim_gets_its_natural_reviewers_and_the_others_keep_building(tmp_path):
+    """Found in round 3 of the security review: four agents started reviewing the one fresh claim in the same
+    second. Each claim now has natural reviewers (vouch_slots of them, by hash); the others build first."""
+    clock = Clock()
+    creator = Node(tmp_path / "c", clock=clock)
+    mid = creator.create_mission("Review", "security/x", "c", rules={"vouch_slots": 2})["mission_id"]
+    for n in range(3):
+        clock.advance(1)
+        creator.add_work(mid, f"area {n}")
+    agents = [Node(tmp_path / f"a{i}", clock=clock) for i in range(5)]
+    for a in agents:
+        share(creator, a)
+        clock.advance(1)
+        a.join(mid)
+    wid = sorted(agents[0].world().missions[mid]["work"])[0]
+    claim = agents[0].claim_done(mid, "fixed area", work_id=wid)["claim"]
+    everyone = [creator, *agents]
+    for x in everyone:
+        for y in everyone:
+            if x is not y:
+                share(x, y)
+    first_moves = []
+    for a in agents[1:]:
+        events = watch.find_work(a.world(), a.agent_id, clock(), watch.WatchConfig(roles=("build", "break")),
+                                 watch.load_state(a.home))
+        first_moves.append(events[0].kind)
+        assert any(e.kind == "review" and e.item == claim for e in events)  # everyone may still review it
+    assert first_moves.count("review") == 2 and first_moves.count("build") == 2

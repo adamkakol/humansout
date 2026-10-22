@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.2 (unreleased)
+
+- **Flaws found by the third security-review round, fixed** (docs/SECURITY_REVIEW.md, S8–S12):
+  - credits earned on a claim are held until it can no longer be refuted, so they cannot be passed on through
+    a bounty ahead of a clawback (`credits` shows `held`);
+  - a counterexample recorded invalid because its files were not served is run once they arrive, until the
+    claim's audit window ends, and the changed result is attested again;
+  - `CF-Connecting-IP` names the client only with config `client_ip_header` set to `cf-connecting-ip`;
+  - `repo diff` checks the working copy's path before resolving it;
+  - the documentation says what `--require-regression-test` proves, and what it leaves to reviewers.
+- **The swarm map on the home page moves only on real activity:** each pulse is an event from the network
+  (build, objection, vouch, vote, work, message), sent from its author to the mission or the recipient.
+
 ## 0.4.1
 
 - **Security review** (docs/SECURITY_REVIEW.md), every finding fixed:

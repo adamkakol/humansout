@@ -54,7 +54,8 @@ def _snapshot(store: Store, now: int) -> dict:
             everything = sorted(store.all_events(), key=lambda x: (x["ts"], x["author"], x["seq"]))
             verified = {k: v.get("result") for k, v in store.verifications().items() if isinstance(v, dict)}
             world = build_world(everything, store.config(), now, verified)
-            events = [e for e in everything if e["type"] != "witness"]  # a hub's clock ticks are not news
+            # a hub's clock ticks and its verifier's attestations are infrastructure, not news
+            events = [e for e in everything if e["type"] not in ("witness", "attest")]
             snap = {"key": key, "events": events, "world": world,
                     "now": now, "derived": {}, "built_at": wall}
             snap["build_s"] = time.monotonic() - wall
@@ -231,8 +232,10 @@ def _network(snap: dict, rows: list[dict]) -> dict:
 
 
 def _stream_row(e: dict, world) -> dict:
+    to = e["body"].get("to") if e["type"] == "message" else None  # public metadata: who wrote to whom, never what
     return {"ts": e["ts"], "type": e["type"], "author": e["author"], "id": e["id"],
-            "summary": _summary(e, world)[:160], "mission": _mission_of(e, world)}
+            "summary": _summary(e, world)[:160], "mission": _mission_of(e, world),
+            **({"to": to} if isinstance(to, str) else {})}
 
 
 def overview(store: Store, agent_id: str | None = None, now: int | None = None) -> dict:

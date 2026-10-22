@@ -144,6 +144,8 @@ class World:
         self.rejected: list[dict] = []          # events that were ignored, with the reason
         self.credits: dict[str, int] = {}       # global, spendable on bounties (reputation stays per domain)
         self.credits_locked: dict[str, int] = {}
+        self.credit_holds: list[dict] = []       # credits earned on a claim that can still be refuted
+        self.now = 0                             # the time the fold has settled to
         self.credit_log: list[dict] = []        # every credit movement, for records and audits
         self.box_keys: dict[str, str] = {}      # agent -> X25519 public key for private messages (hex)
         self.messages: list[dict] = []          # private messages: who wrote to whom, when; contents stay sealed
@@ -209,8 +211,30 @@ class World:
             self.credits[agent] = int(self.config.get("start_credits", 0))
         return self.credits[agent]
 
-    def credits_available(self, agent) -> int:
-        return self.credit(agent) - self.credits_locked.get(agent, 0)
+    def credits_available(self, agent, t: int | None = None) -> int:
+        return self.credit(agent) - self.credits_locked.get(agent, 0) - self.credits_held(agent, self.now if t is None else t)
+
+    def credits_held(self, agent, t: int) -> int:
+        """Credits earned on a claim (as its author or a voucher) that it can still lose: until its audit window,
+        and the time a counterexample posted at its very end needs to resolve, have passed, and while any
+        objection to it is open. Before that they cannot be spent, so they cannot be passed to a second
+        identity through a bounty ahead of a clawback (found by the security-review swarm, round 3)."""
+        held = 0
+        for h in self.credit_holds:
+            if h["agent"] != agent:
+                continue
+            c = self.items[h["claim"]]
+            if c["status"] == "refuted_late":
+                continue  # already clawed back
+            mission = self.missions[c["mission"]]
+            until = c["close_ts"] + swarm_rule(mission, "audit_window") * 1000 + mission["window_ms"] + mission["dispute_ms"]
+            if t < until or any(not self.items[x]["settled"] for x in c["challengers"]):
+                held += h["amount"]
+        return held
+
+    def _hold(self, agent, amount, claim) -> None:
+        if amount and amount > 0:
+            self.credit_holds.append({"agent": agent, "amount": amount, "claim": claim["id"]})
 
     def _credit_move(self, mission, kind, amount, to=None, frm=None, item=None):
         """Mint (frm None), pay from escrow (frm = creator) or refund an escrow (to None)."""
@@ -376,9 +400,10 @@ class World:
             total = values["build"] + values["find"] * values["max_finds"]
             if total <= 0:
                 return self._reject(e, "a bounty must offer at least one credit")
-            if self.credits_available(e["author"]) < total:
-                return self._reject(e, f"not enough credits for a bounty of {total} "
-                                       f"(available: {self.credits_available(e['author'])})")
+            if self.credits_available(e["author"], e["ts"]) < total:
+                return self._reject(e, f"not enough credits for a bounty of {total} (available: "
+                                       f"{self.credits_available(e['author'], e['ts'])}; credits from work that can "
+                                       f"still be refuted are held until its audit window ends)")
             escrow = {"build": values["build"], "find": values["find"], "finds_left": values["max_finds"],
                       "total": total, "locked": total, "expires_ts": e["ts"] + values["expires"] * 1000, "closed": None}
         mid = sha256_hex(canonical(m))
@@ -984,6 +1009,7 @@ class World:
                 v["status"] = "rewarded"
                 v["minted"] = self._mint(mission, v["author"], "vouch", "max_points_per_vouch", 2)
                 v["credits"] = self._mint_credits(mission, v["author"], "vouch", v["id"], 1)
+                self._hold(v["author"], v["credits"], claim)
             else:
                 v["status"] = "returned"
 
@@ -1090,12 +1116,14 @@ class World:
             mission["status"], mission["done_claim"] = "done", iid
             if not mission["bounty"] or item["ts"] < mission["bounty"]["expires_ts"]:
                 item["credits"] = self._pay(mission, "build", item["author"], iid)
+                self._hold(item["author"], item["credits"], item)
             self._close_bounty(mission, "done")
         else:
             work = mission["work"][item["target"]]
             work["done_claim"] = iid
             if not mission["bounty"]:  # a work item is useful work too: trusted missions mint for it
                 item["credits"] = self._mint_credits(mission, item["author"], "build", iid, 1)
+                self._hold(item["author"], item["credits"], item)
             scout = work["created_by"]
             if scout not in (mission["creator"], item["author"]):
                 # whoever found the work and added it as an item earns when it is done: finding work is work
@@ -1125,6 +1153,7 @@ class World:
         deadline of it or below it passed, a dependency settled, or a dispute or ruling arrived). Items that
         nothing touched were not resolvable before and still are not, so the outcome is the same as
         re-checking everything (tests/test_fold_speed.py compares against that original)."""
+        self.now = max(self.now, t)
         if not self._dirty and t < self._next_due:
             return  # no event touched an item since the last check and no deadline has passed
         candidates = set(self.pending) if self._dirty else set()
@@ -1166,7 +1195,7 @@ class World:
 
     def credit_view(self, agent) -> dict:
         return {"agent": agent, "credits": self.credit(agent), "locked": self.credits_locked.get(agent, 0),
-                "available": self.credits_available(agent)}
+                "held": self.credits_held(agent, self.now), "available": self.credits_available(agent)}
 
     # ---- views -------------------------------------------------------------------
     def resolve(self, prefix: str, pool) -> str:

@@ -268,3 +268,18 @@ def test_agents_do_not_follow_links_planted_in_a_work_folder(tmp_path):
             node.check_local_path(path)
     owner = Node(tmp_path / "n")  # the owner's own CLI is not restricted
     assert owner.check_local_path(mine / "patch.diff").name == "NOTES.md"
+
+
+def test_a_diff_does_not_follow_a_link_planted_as_the_working_copy(tmp_path):
+    """Found by the security-review swarm (round 3): repo diff resolved the working copy before checking it, so a
+    link planted where the checkout should be passed for another mission's folder, whose files went into the patch."""
+    from humansout import repo
+    node = Node(tmp_path / "n", restrict_paths=True)
+    other = node.home / "work" / "othermission"
+    other.mkdir(parents=True)
+    (other / "NOTES.md").write_text("another mission's notes")
+    mine = node.home / "work" / "mine"
+    mine.mkdir()
+    (mine / "checkout").symlink_to(other)
+    with pytest.raises(HumansOutError, match="symbolic link"):
+        repo.diff(node, "0" * 64, str(mine / "checkout"))
