@@ -393,6 +393,50 @@ class World:
         good, wrong = max(st["vouched"] - 1, 0), st["vouched_wrong"]
         return mission["bounty"]["prices"]["review"] * (good + 1) // (good + 3 + 3 * wrong)
 
+    def _owed(self, mission, work) -> bool:
+        """An item's reserve is still owed while a claim on it made before expiry has not settled."""
+        b = mission["bounty"]
+        return any(self.items[i]["target"] == work["id"] and not self.items[i]["settled"]
+                   and self.items[i]["ts"] < b["expires_ts"] for i in mission["claims"])
+
+    def _wind_down(self, mission) -> None:
+        """The whole mission's result is accepted (0.5 budgets): reserves no pending item claim is owed, and the
+        unreserved part, go back to the creator now; the reserves item claims made in time are owed stay until
+        those settle (the budget promised them), then the budget closes (_settle_budgets)."""
+        b = mission["bounty"]
+        if b["closed"]:
+            return
+        for w in mission["work"].values():
+            if w["reserve"] and not self._owed(mission, w):
+                self._release_reserve(mission, w["id"])
+                w["funded"] = False
+        self._credit_move(mission, "refund (done)", b["locked"] - b["reserved"], frm=mission["creator"])
+        b["locked"], b["winding_down"] = b["reserved"], True
+        if not b["reserved"]:
+            self._close_bounty(mission, "done")
+
+    def _settle_budgets(self, t) -> None:
+        """Budgets close: at expiry once no claim made in time is pending (work submitted in time is still paid
+        when it is accepted later), at the latest CLOSE_GRACE_MS after expiry (a claim that never settles, say a
+        check nobody can run, cannot keep a budget locked for ever), and after the whole mission's result once
+        the item claims it still owes have settled."""
+        for mission in self._bounty_missions:
+            b = mission["bounty"]
+            if b["closed"]:
+                continue
+            if b.get("winding_down"):
+                for w in mission["work"].values():
+                    if w["reserve"] and not self._owed(mission, w):
+                        self._release_reserve(mission, w["id"])
+                        w["funded"] = False
+                if not b["reserved"] or t >= b["expires_ts"] + CLOSE_GRACE_MS:
+                    self._close_bounty(mission, "done")
+            elif t >= b["expires_ts"] and mission["status"] != "done":
+                waiting = any((self.items[i]["target"] == "mission" or b["v"] == 2) and not self.items[i]["settled"]
+                              and self.items[i]["ts"] < b["expires_ts"] for i in mission["claims"])
+                if not waiting or t >= b["expires_ts"] + CLOSE_GRACE_MS:
+                    self._close_bounty(mission, "expired")
+
     def _close_bounty(self, mission, reason):
         b = mission["bounty"]
         if b and not b["closed"]:
@@ -851,9 +895,10 @@ class World:
                                     "item": e["id"]})
 
     def _canary_commit(self, e):
-        """A treasury plants a faulty claim to test reviewers: first it commits to sha256("<agent id>:<salt>") of the
-        agent that will post it, and locks a bounty for whoever refutes it. Reviewers cannot tell a canary from real
-        work, so vouching without checking stops paying."""
+        """A treasury plants a faulty claim to test reviewers: first it commits to sha256("<agent id>:<cid>:<salt>"):
+        the agent that will post it and the exact deliverable, and locks a bounty for whoever refutes it. Nobody can
+        predict another agent's deliverable, so the treasury cannot commit in advance to framing an honest agent.
+        Reviewers cannot tell a canary from real work, so vouching without checking stops paying."""
         body = e["body"]
         h, bounty = body.get("hash"), body.get("bounty", 0)
         if e["author"] not in self.treasury:
@@ -877,15 +922,17 @@ class World:
         c = self.canaries.get(body.get("commit")) if isinstance(body.get("commit"), str) else None
         if c is None or c["author"] != e["author"] or c["status"] != "open" or e["ts"] >= c["ts"] + CANARY_TTL_MS:
             return self._reject(e, "no open canary of yours with that commitment (they expire after 90 days)")
-        agent, salt, cid = body.get("agent"), body.get("salt"), body.get("claim")
-        if not isinstance(agent, str) or not PUB_RE.match(agent) or not isinstance(salt, str) or not 1 <= len(salt) <= 200:
-            return self._reject(e, "agent must be an agent id and salt a string of 1 .. 200 characters")
-        if sha256_hex(f"{agent}:{salt}".encode()) != c["hash"]:
-            return self._reject(e, "agent and salt do not match the commitment")
+        agent, deliverable, salt, cid = body.get("agent"), body.get("cid"), body.get("salt"), body.get("claim")
+        if (not isinstance(agent, str) or not PUB_RE.match(agent) or not isinstance(deliverable, str)
+                or not CID_RE.match(deliverable) or not isinstance(salt, str) or not 1 <= len(salt) <= 200):
+            return self._reject(e, "agent must be an agent id, cid a content id and salt a string of 1 .. 200 characters")
+        if sha256_hex(f"{agent}:{deliverable}:{salt}".encode()) != c["hash"]:
+            return self._reject(e, "agent, cid and salt do not match the commitment")
         claim = self.items.get(cid) if isinstance(cid, str) else None
         if cid is not None and (claim is None or claim["kind"] != "claim" or claim["author"] != agent
-                                or claim["ts"] <= c["ts"]):
-            return self._reject(e, "claim must be a claim by that agent, posted after the commitment")
+                                or claim["ts"] <= c["ts"] or claim["evidence"]["cids"][:1] != [deliverable]):
+            return self._reject(e, "claim must be a claim by that agent with that deliverable, posted after the "
+                                   "commitment")
         if claim is not None and not claim["settled"]:
             return self._reject(e, "the claim has not settled yet")
         mission = self.missions[claim["mission"]] if claim else None
@@ -1564,7 +1611,10 @@ class World:
         if v2:
             self._release_reserve(mission, item["target"])
         if item["target"] == "mission":
-            self._close_bounty(mission, "done")
+            if v2:
+                self._wind_down(mission)
+            else:
+                self._close_bounty(mission, "done")
 
     def _with_ancestors(self, iid):
         """An item and everything it objects to, up the chain: their settling depends on it."""
@@ -1612,15 +1662,7 @@ class World:
                             heapq.heappush(current, (key(j), j))  # still ahead in this pass
                         else:
                             candidates.add(j)                       # already passed: next pass
-        for mission in self._bounty_missions:
-            b = mission["bounty"]
-            if not b["closed"] and t >= b["expires_ts"] and mission["status"] != "done":
-                waiting = any((self.items[i]["target"] == "mission" or b["v"] == 2) and not self.items[i]["settled"]
-                              and self.items[i]["ts"] < b["expires_ts"] for i in mission["claims"])
-                # work submitted in time is still paid when it is accepted later, but a claim that never settles
-                # (a check nobody can run) cannot keep the budget locked for ever
-                if not waiting or t >= b["expires_ts"] + CLOSE_GRACE_MS:
-                    self._close_bounty(mission, "expired")
+        self._settle_budgets(t)
         self._dirty = False
         while self._deadlines and self._deadlines[0][1] not in self.pending:
             heapq.heappop(self._deadlines)

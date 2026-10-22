@@ -211,6 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="action", required=True)
     cc = cy.add_parser("commit", help="commit to a canary from one of your agents, with a bounty for whoever catches it")
     cc.add_argument("--agent", required=True, help="the id of the agent that will post the faulty claim")
+    cc.add_argument("--deliverable", required=True, help="the file it will post as the claim's deliverable")
     cc.add_argument("--bounty", type=int, default=0)
     cr = cy.add_parser("reveal", help="show which settled claim was the canary (no --claim: it was never planted)")
     cr.add_argument("commit")
@@ -506,7 +507,7 @@ def run(args) -> object:
         return node.treasury(args.issue, args.weekly_cap)
     if cmd == "canary":
         if action == "commit":
-            return node.canary_commit(args.agent, args.bounty)
+            return node.canary_commit(args.agent, args.deliverable, args.bounty)
         if action == "reveal":
             return node.canary_reveal(args.commit, args.claim, args.defect)
         return sorted(node.world().canaries.values(), key=lambda c: c["ts"])

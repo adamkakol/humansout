@@ -59,6 +59,13 @@ def build(n, who, mid, tmp_path, tag, work_id=None, verified=True):
     return claim
 
 
+def deliverable(tmp_path, who, tag):
+    """The file build() will publish for this agent and tag: a canary's commitment names it in advance."""
+    f = tmp_path / f"{who}-{tag}.py"
+    f.write_text(f"# {tag}\n")
+    return str(f)
+
+
 def vouch(n, who, mid, claim):
     if n[who].agent_id not in [p["agent"] for p in n[who].mission_state(mid)["participants"]]:
         n[who].join(mid)
@@ -211,6 +218,29 @@ def test_a_late_refutation_pays_the_finder_from_what_the_wrong_work_earned(net):
     assert n["treasury"].world().items[second]["credits"] == 10
 
 
+def test_the_whole_result_keeps_what_pending_item_claims_are_owed(net):
+    """Accepting the whole mission's result closes its budget, but not before the item claims made in time, which
+    the budget promised to pay, have settled."""
+    clock, n, tmp, test = net
+    mid = mission(n["alice"], test, {"budget": 50, "build": 20, "item": 10})
+    item = n["alice"].add_work(mid, "ASCII letters")["work_id"]
+    n["alice"].add_work(mid, "Polish letters")  # nobody claims it: its reserve comes back with the result
+    share(*n.values())
+    clock.advance(1)
+    whole = build(n, "carol", mid, tmp, "whole")
+    clock.advance(50)
+    part = build(n, "bob", mid, tmp, "part", work_id=item)
+    clock.advance(60)  # the whole result is accepted; bob's item claim is still in its window
+    world = n["treasury"].world()
+    assert world.items[whole]["status"] == "accepted" and world.items[whole]["credits"] == 20
+    assert budget_of(n, mid)["locked"] == 10 and not budget_of(n, mid)["closed"]
+    assert credits(n, "alice")["credits"] == 30 and credits(n, "alice")["locked"] == 10
+    clock.advance(50)
+    assert n["treasury"].world().items[part]["credits"] == 10
+    assert budget_of(n, mid)["closed"] == "done" and credits(n, "alice") == {
+        "agent": n["alice"].agent_id, "credits": 20, "locked": 0, "held": 0, "available": 20}
+
+
 def test_a_budget_closes_even_if_a_claim_never_settles(net):
     """A claim made in time is paid when it is accepted after expiry, but one that never settles (a check nobody
     runs) cannot keep the budget locked for ever."""
@@ -300,7 +330,7 @@ def test_a_canary_nobody_catches_costs_its_reviewers_what_they_staked_and_earned
     n["treasury"].treasury(issue=1000)
     mid = mission(n["treasury"], test, {"budget": 100, "item": 20, "review": 6}, audit_window=3600)
     wid = n["treasury"].add_work(mid, "ASCII letters")["work_id"]
-    commit = n["treasury"].canary_commit(n["dave"].agent_id, bounty=30)["commit"]
+    commit = n["treasury"].canary_commit(n["dave"].agent_id, deliverable(tmp, "dave", "faulty"), bounty=30)["commit"]
     share(*n.values())
     assert n["carol"].world().economy()["canaries_open"] == 1  # public: a canary is out, nobody knows where
     clock.advance(1)
@@ -327,7 +357,7 @@ def test_a_caught_canary_pays_its_finder_the_bounty(net):
     n["treasury"].treasury(issue=1000)
     mid = mission(n["treasury"], test, {"budget": 100, "item": 20, "find": 5})
     wid = n["treasury"].add_work(mid, "ASCII letters")["work_id"]
-    commit = n["treasury"].canary_commit(n["dave"].agent_id, bounty=30)["commit"]
+    commit = n["treasury"].canary_commit(n["dave"].agent_id, deliverable(tmp, "dave", "faulty"), bounty=30)["commit"]
     share(*n.values())
     clock.advance(1)
     canary = build(n, "dave", mid, tmp, "faulty", work_id=wid)
@@ -347,23 +377,27 @@ def test_a_canary_reveal_must_name_its_own_agents_claim_in_time(net):
     n["treasury"].treasury(issue=1000)
     mid = mission(n["treasury"], test, {"budget": 100, "item": 20}, audit_window=600)
     wid = n["treasury"].add_work(mid, "ASCII letters")["work_id"]
-    commit = n["treasury"].canary_commit(n["dave"].agent_id, bounty=30)["commit"]
+    commit = n["treasury"].canary_commit(n["dave"].agent_id, deliverable(tmp, "dave", "faulty"), bounty=30)["commit"]
+    # committing to an honest agent in advance frames nothing: its real deliverable is not the one committed to
+    framing = n["treasury"].canary_commit(n["bob"].agent_id, deliverable(tmp, "x", "guess"), bounty=10)["commit"]
     share(*n.values())
     with pytest.raises(HumansOutError, match="only a treasury plants canaries"):
-        n["bob"].canary_commit(n["dave"].agent_id)
+        n["bob"].canary_commit(n["dave"].agent_id, deliverable(tmp, "dave", "faulty"))
     clock.advance(1)
     honest = build(n, "bob", mid, tmp, "v1", work_id=wid)
     clock.advance(101)
     with pytest.raises(HumansOutError, match="a claim by that agent"):
-        n["treasury"].canary_reveal(commit, honest)  # a treasury cannot frame honest work
-    later = n["treasury"].canary_commit(n["bob"].agent_id, bounty=10)["commit"]
+        n["treasury"].canary_reveal(commit, honest)
+    with pytest.raises(HumansOutError, match="with that deliverable"):
+        n["treasury"].canary_reveal(framing, honest)
+    later = n["treasury"].canary_commit(n["bob"].agent_id, deliverable(tmp, "bob", "v1"), bounty=10)["commit"]
     with pytest.raises(HumansOutError, match="posted after the commitment"):
         n["treasury"].canary_reveal(later, honest)
     n["treasury"].canary_reveal(commit)  # never planted: the bounty comes back
     assert n["treasury"].world().canaries[commit]["status"] == "revealed"
     clock.advance(CANARY_TTL_MS // 1000)
     assert n["treasury"].world().canaries[later]["status"] == "expired"
-    assert credits(n, "treasury")["locked"] == 0  # the budget expired and both bounties are free again
+    assert credits(n, "treasury")["locked"] == 0  # the budget expired and every bounty is free again
 
 
 def test_dormant_accounts_give_their_credits_back_to_the_treasury(net):

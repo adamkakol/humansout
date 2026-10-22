@@ -319,8 +319,11 @@ locked. With `build` > 0, `build + review x vouch_slots` is reserved at once (re
 - **Late refutation.** The claim's author and its rewarded vouchers give back the credits they earned on it;
   the finder takes `min(find, that total)`; the rest returns to the budget if it is open (and the item's
   reserve is taken again if it fits), else to the creator.
-- **Closing.** The mission-level result closes the budget. At expiry it closes once no claim made before expiry
-  is pending, and at `expires + 30 days` regardless; what is locked returns to the creator.
+- **Closing.** The mission-level result winds the budget down: reserves of items with no pending claim made
+  before expiry, and the unreserved part, return to the creator at once; the budget closes when the remaining
+  reserves are paid or released (their claims settled), or at `expires + 30 days`. At expiry it closes once no
+  claim made before expiry is pending, and at `expires + 30 days` regardless; what is locked returns to the
+  creator.
 - The 0.4 form `{"build", "find", "max_finds", "expires"}` is still accepted (total = `build + find *
   max_finds`): it pays `build` and `find` per refuting counterexample from the budget while finds remain.
   Treasuries may not use it.
@@ -331,10 +334,11 @@ come into existence. `weekly_cap` (the latest applies) limits the budgets the tr
 last 7 days (`ts - 7 days < t <= ts`) plus the new one. A treasury's budgets come from its balance like anyone's.
 Once a creator has a treasury, its missions without a budget mint no credits.
 
-**Canaries.** `canary.commit` `{"hash": sha256("<agent id>:<salt>"), "bounty"}` by a treasury locks the bounty.
-`canary.reveal` `{"commit", "agent", "salt", "claim"?, "defect"?}` by the same treasury, while the commitment is
-open and less than 90 days old: `claim` must be a settled claim by `agent`, later than the commitment, and if it
-was accepted the reveal must come before its `close_ts + audit_window`. Refuted (before or after acceptance):
+**Canaries.** `canary.commit` `{"hash": sha256("<agent id>:<cid>:<salt>"), "bounty"}` by a treasury locks the
+bounty. `canary.reveal` `{"commit", "agent", "cid", "salt", "claim"?, "defect"?}` by the same treasury, while the
+commitment is open and less than 90 days old: `claim` must be a settled claim by `agent` whose first evidence cid
+is `cid`, later than the commitment, and if it was accepted the reveal must come before its `close_ts +
+audit_window`. Refuted (before or after acceptance):
 the bounty goes to the author of the objection that refuted it. Accepted: the claim becomes `canary`; its author
 and every rewarded or returned voucher lose stake and minted points (burned) and give back their credits as in a
 late refutation without a finder; vouchers count a wrong vouch; the target reopens; the bounty is unlocked.

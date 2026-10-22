@@ -25,13 +25,7 @@ def reference_settle(self, t):
             if iid in self.pending and self._resolvable(iid, t):
                 self._settle(iid, t)
                 progress = True
-    for mission in self.missions.values():
-        b = mission["bounty"]
-        if b and not b["closed"] and t >= b["expires_ts"] and mission["status"] != "done":
-            waiting = any((self.items[i]["target"] == "mission" or b["v"] == 2) and not self.items[i]["settled"]
-                          and self.items[i]["ts"] < b["expires_ts"] for i in mission["claims"])
-            if not waiting or t >= b["expires_ts"] + state.CLOSE_GRACE_MS:
-                self._close_bounty(mission, "expired")
+    self._settle_budgets(t)  # budgets close on deadlines, not on lazy settling: the same code
 
 
 def decide(events, config, now, verified, reference, monkeypatch):

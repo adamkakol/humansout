@@ -15,7 +15,7 @@ import secrets
 import time
 from pathlib import Path
 
-from .core import HumansOutError, Identity, canonical, sha256_hex
+from .core import HumansOutError, Identity, canonical, cid_for, sha256_hex
 from . import sandbox
 from .state import PROFILES, SWARM_RULES, build_world, file_list_error
 from .store import CID_RE, PUB_RE, Store
@@ -218,24 +218,27 @@ class Node:
         event = self._emit("treasury", body)
         return {"treasury": self.agent_id, **body, "event": event["id"], "economy": self.world().economy()}
 
-    def canary_commit(self, agent: str, bounty: int = 0) -> dict:
-        """As a treasury: commit to planting a faulty claim from `agent` (a key of yours that does ordinary work),
-        with a bounty for whoever refutes it. The salt stays in canaries.json on this node until the reveal."""
+    def canary_commit(self, agent: str, deliverable: str, bounty: int = 0) -> dict:
+        """As a treasury: commit to planting a faulty claim: `agent` (a key of yours that does ordinary work) will
+        post `deliverable` (a local file) as its claim's deliverable. A bounty goes to whoever refutes it. The salt
+        stays in canaries.json on this node until the reveal; the file is not stored here."""
         if not PUB_RE.match(str(agent)):
             raise HumansOutError("give the canary agent's full id (64 hex characters)")
+        cid = cid_for(Path(deliverable).expanduser().read_bytes())
         salt = secrets.token_hex(16)
-        digest = sha256_hex(f"{agent}:{salt}".encode())
+        digest = sha256_hex(f"{agent}:{cid}:{salt}".encode())
         path = self.home / "canaries.json"
         try:
             kept = json.loads(path.read_text())
         except (OSError, ValueError):
             kept = {}
-        kept[digest] = {"agent": agent, "salt": salt}
+        kept[digest] = {"agent": agent, "cid": cid, "salt": salt}
         event = self._emit("canary.commit", {"hash": digest, "bounty": int(bounty)})
         path.write_text(json.dumps(kept, indent=1))
         os.chmod(path, 0o600)
-        return {"commit": digest, "agent": agent, "bounty": int(bounty), "event": event["id"],
-                "next": "post the faulty claim from that agent; once it has settled, `humansout canary reveal`"}
+        return {"commit": digest, "agent": agent, "cid": cid, "bounty": int(bounty), "event": event["id"],
+                "next": "post that file as the claim's deliverable from that agent; once the claim has settled, "
+                        "`humansout canary reveal`"}
 
     def canary_reveal(self, commit: str, claim: str | None = None, defect: str = "") -> dict:
         """As a treasury: show which settled claim was the canary (or none, to take the bounty back)."""
@@ -243,7 +246,7 @@ class Node:
             kept = json.loads((self.home / "canaries.json").read_text())[commit]
         except (OSError, ValueError, KeyError):
             raise HumansOutError(f"no canary {commit[:12]} in canaries.json on this node") from None
-        body = {"commit": commit, "agent": kept["agent"], "salt": kept["salt"], "defect": defect}
+        body = {"commit": commit, "agent": kept["agent"], "cid": kept["cid"], "salt": kept["salt"], "defect": defect}
         after = None
         if claim:
             world = self.world()
