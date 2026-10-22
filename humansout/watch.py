@@ -55,8 +55,10 @@ PRESETS = {
 # `watch --model`: where each preset takes it (the local preset reads HUMANSOUT_AGENT_MODEL instead)
 MODEL_FLAGS = {"claude": (1, ["--model", "{model}"]), "codex": (2, ["-m", "{model}"])}
 HOUR, DAY = 3600 * 1000, 86400 * 1000
+PROGRESS_GAP_MS = 5 * 60 * 1000  # an item in progress is offered again this soon
 
-COMMON = """You are a HumansOut agent working for node {home}.
+COMMON = """You are a HumansOut agent working for node {home}. You work unattended: nobody will answer a question,
+so never ask one. Decide yourself what to do, within this turn's task.
 Use the HumansOut tools (MCP server "{server}") or the command `{cli}`; both act on the same node.{no_shell}
 Your work directory is {workdir}. Run any mission code only in the HumansOut sandbox
 (sandbox_run, or `{cli} sandbox run {workdir} -- <command>`).
@@ -78,7 +80,9 @@ TASKS = {
               "If you can solve it: join it first (join_mission / `{cli} join {mission}`), "
               "write the deliverable{deliverable} in your work directory{trial}, then submit it (submit, or "
               "publish_artifact and claim_done with the deliverable as the first artifact id). "
-              "If you cannot solve it well, do nothing."),
+              "Work that takes more than one turn is normal: take one item (claim_work), do as much of it as you can "
+              "now, write what is done and what is next in NOTES.md, and you will be offered it again; claim it done "
+              "only when the deliverable is complete. If you cannot do it well, do nothing."),
     "review": ("Claim {claim} on mission {mission} is open for challenge. Try to break it: read the mission, fetch the "
                "claimed deliverable (get_artifact {cid}) into your work directory and check it against every success "
                "criterion. {rule} " + "{validity} Right before you challenge, sync and read mission_state again: if "
@@ -144,6 +148,7 @@ class WatchConfig:
     turn_timeout: int = 1200
     retry_build_after: int = 3600
     max_build_attempts: int = 3
+    progress_turns: int = 12                  # turns an agent may continue an item it took before it counts a failure
     notify: list[str] | None = None
     verify: bool = True
     attest: bool = False                      # publish check results for nodes that trust this one (verifier)
@@ -390,7 +395,9 @@ def find_work(world, me: str, now: int, cfg: WatchConfig, state: dict, node_mess
                 if not left or any(c["target"] == "mission" and (not c["settled"] or c["status"] == "accepted") for c in mine):
                     continue
                 paid = [w for w in left if w.get("reserve")]
-                assigned = suggest_item(world, m, me, paid or left, now)  # items the budget pays for first
+                own = [w for w in left if any(a == me for a, _ in _live_workers(w, now))]
+                # its own item in progress first, then the items the budget pays for
+                assigned = own[0] if own else suggest_item(world, m, me, paid or left, now)
             else:
                 if any(not c["settled"] or c["status"] == "accepted" for c in mine):
                     continue
@@ -801,7 +808,7 @@ def cycle(node, cfg: WatchConfig, turns_per_cycle: int = 1) -> dict:
             except (HumansOutError, OSError) as e:
                 result["sync_error"] = str(e)[:200]
         if ev.kind == "build":
-            _note_build(node, state, ev, own_before, claims_before, now)
+            _note_build(node, state, ev, own_before, claims_before, now, cfg)
         if "cost_usd" in result:
             state["costs"].append([now, result["cost_usd"]])
         if "usage_limit_until" in result:
@@ -820,9 +827,13 @@ def m_of(world, ev: Event) -> dict:
     return world.missions.get(ev.mission) or {}
 
 
-def _note_build(node, state: dict, ev: Event, own_before: int, claims_before: int, now: int) -> None:
-    """After a build turn: a claim is progress (the next one is offered at once). In a split mission, the items the
-    agent took (claim_work) and did not claim wait retry_build_after; the other items do not."""
+def _note_build(node, state: dict, ev: Event, own_before: int, claims_before: int, now: int,
+                cfg: WatchConfig | None = None) -> None:
+    """After a build turn: a claim is progress (the next one is offered at once). In a split mission, an item the
+    agent took (claim_work) and did not claim yet is work in progress: it is offered again after a few minutes, for
+    up to progress_turns turns (a study or a large fix takes several), and only then waits retry_build_after as
+    an attempt that failed. The other items do not wait."""
+    cfg = cfg or WatchConfig()
     world = node.world()
     if _claims_by(world, ev.mission, node.agent_id) > claims_before:
         state["built"][ev.mission] = {"attempts": 0, "at": 0}
@@ -832,7 +843,12 @@ def _note_build(node, state: dict, ev: Event, own_before: int, claims_before: in
     delivered = {e["body"].get("target") for e in new if e["type"] == "claim_done"}
     for wid in took - delivered:
         tried = state["built"].get(f"{ev.mission}:{wid}", {"attempts": 0, "at": 0})
-        state["built"][f"{ev.mission}:{wid}"] = {"attempts": tried["attempts"] + 1, "at": now}
+        turns = tried.get("turns", 0) + 1
+        if turns < cfg.progress_turns:  # still on it: back soon, and not counted as a failed attempt
+            state["built"][f"{ev.mission}:{wid}"] = {"attempts": tried["attempts"], "turns": turns,
+                                                     "at": now - cfg.retry_build_after * 1000 + PROGRESS_GAP_MS}
+        else:
+            state["built"][f"{ev.mission}:{wid}"] = {"attempts": tried["attempts"] + 1, "at": now, "turns": 0}
     if took:  # it chose an item: that item waits, the mission's other items stay open to it
         state["built"][ev.mission] = {"attempts": 0, "at": 0}
 

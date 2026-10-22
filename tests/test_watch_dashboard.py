@@ -564,3 +564,36 @@ def test_reviewers_see_the_authors_public_record(tmp_path):
               if e.kind == "review" and e.item == claim)
     prompt = watch.render_prompt(reviewer, reviewer.world(), ev, watch.WatchConfig(roles=("break",)), tmp_path)
     assert "Its author's record in research/x: no record in this domain yet" in prompt
+
+
+def test_an_item_in_progress_is_offered_again_soon_and_unattended_agents_decide(tmp_path):
+    """Found in the research mission (22 October): a study takes several turns, and the first agent asked its owner
+    which item to take instead of starting one. An item the agent took and has not delivered yet is offered again
+    after a few minutes, for up to progress_turns turns, and the prompt says nobody will answer questions."""
+    clock = Clock()
+    creator = Node(tmp_path / "c", clock=clock)
+    mid = creator.create_mission("Study", "research/x", "a paper")["mission_id"]
+    clock.advance(1)
+    wid = creator.add_work(mid, "study 1")["work_id"]
+    agent = Node(tmp_path / "a", clock=clock)
+    share(creator, agent)
+    clock.advance(1)
+    agent.join(mid)
+    cfg = watch.WatchConfig(roles=("build",), progress_turns=3)
+    state = watch.load_state(agent.home)
+    for turn in range(3):
+        own_before = len(agent.store.load_feed(agent.agent_id))
+        agent.claim_work(mid, wid)  # this turn's work: it took the item and wrote its notes, no claim yet
+        watch._note_build(agent, state, watch.Event("build", mid, None, {}), own_before, 0, clock(), cfg)
+        key = f"{mid}:{wid}"
+        if turn < 2:
+            assert not watch._may_try(state, key, clock() + 60_000, cfg)       # not at once,
+            assert watch._may_try(state, key, clock() + 6 * 60_000, cfg)       # but a few minutes later
+            assert state["built"][key]["attempts"] == 0
+        clock.advance(6 * 60)
+    assert state["built"][key]["attempts"] == 1  # after progress_turns turns it counts as a failed attempt
+    assert not watch._may_try(state, key, clock() + 6 * 60_000, cfg)
+    events = watch.find_work(agent.world(), agent.agent_id, clock(), watch.WatchConfig(roles=("build",)),
+                             watch.load_state(agent.home))
+    prompt = watch.render_prompt(agent, agent.world(), events[0], watch.WatchConfig(roles=("build",)), tmp_path)
+    assert "nobody will answer a question" in prompt and "more than one turn is normal" in prompt
