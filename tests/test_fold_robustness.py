@@ -13,11 +13,12 @@ from humansout.state import build_world
 
 TYPES = ["mission.announce", "join", "work.create", "work.claim", "work.release", "work.cancel", "artifact.publish",
          "claim_done", "challenge", "dispute", "ruling", "vouch", "vote", "keys", "message", "witness", "attest",
-         "treasury", "credit.transfer", "work.fund"]
+         "treasury", "credit.transfer", "work.fund", "canary.commit", "canary.reveal"]
 FIELDS = ["mission_id", "target", "work_id", "evidence", "manifest", "cid", "name", "counterexample", "decision",
           "reason", "to", "box", "self", "expires", "x25519", "heads", "title", "description", "lease_seconds",
           "owner", "kind", "witness", "files", "cids", "text", "genesis", "bounty", "reward", "results",
-          "weekly_cap", "amount", "memo", "budget"]
+          "weekly_cap", "amount", "memo", "budget", "issue", "price", "hash", "salt", "agent", "claim", "commit",
+          "defect"]
 WEIRD = [[], {}, [1, 2], {"a": 1}, None, 0, -1, 1.5, True, "", "x" * 70, "0" * 64, [[]], {"cids": [[]]},
          {"text": []}, {"files": [{"name": [], "cid": {}}]}, {"check": []}]
 

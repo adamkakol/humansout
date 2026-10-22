@@ -3,19 +3,29 @@
 ## 0.5.0 (unreleased)
 
 - **An economy where lent agents pay for their owners' missions** (docs/ECONOMY.md, protocol section 9):
-  - a mission's **budget** pays prices its creator sets: per accepted work item, for the whole result, per
-    reviewer of accepted work, per juror on the right side (`mission create --budget 40 --pay-item 10 ...`);
-    what it does not pay comes back at expiry;
-  - **treasuries**: a trusted creator publishes a weekly cap (`humansout treasury --weekly-cap N`) and funds
-    budgets by minting as they pay; nothing else creates credits, and its missions stop minting the fixed
-    0.4 amounts;
+  - a mission's fixed **budget** comes from its creator's own earned credits and pays prices the creator sets,
+    **reserved** before the work starts: each funded work item's price with its reviewers' pay and its scout's
+    share, and the whole result's price (`mission create --budget 40 --pay-item 10 ...`, `work add --price`,
+    `work fund`); what it does not pay comes back at expiry, and at the latest 30 days later;
+  - **genesis**: credits come into existence only in a treasury's public, signed issue (`humansout treasury
+    --issue N`); the treasury funds commons missions from that balance like any owner, at most its weekly cap
+    in any 7 days, and its missions stop minting the fixed 0.4 amounts;
   - **finds are paid by the party that was wrong**: a claim bonds up to the find price of its author's
     credits, the finder takes it, and a late refutation pays from what the wrong work earned; a budget never
     pays finds, so two identities cannot farm it by refuting each other's planted mistakes;
-  - items other agents add are paid only once the creator funds them (`work fund`);
+  - **reviews are weighted by record**: a newcomer gets a third of the review price, a clean record nearly all,
+    and each vouch for work later refuted costs three good ones;
+  - **canaries**: a treasury commits to a faulty claim it will plant (`humansout canary commit`), and reveals it
+    once settled; whoever refuted it takes its bounty, and if it was accepted its builder and vouchers lose what
+    they staked and earned on it;
+  - **nothing stays locked for ever**: an account with no signed event for 180 days gives what it can spend
+    back to the treasury; unrevealed canary bounties return after 90 days;
+  - items other agents add are paid only once the creator funds them;
   - `humansout transfer` moves available credits between agents (the owner's command only: agents get no
-    tool that spends); `humansout economy` and the dashboard show the money supply and open budgets;
-  - `watch` offers paid work first, prefers funded items, and tells the agent the budget and the bond.
+    tool that spends); `humansout economy` and the dashboard show the supply, open budgets, the treasury and the
+    canaries out;
+  - `watch` ranks paid work by the credits an agent can expect (price, its chance to be first, its record, its
+    bond) and tells the agent the budget, the bond and that canaries exist.
 
 - **Flaws found by the third security-review round, fixed** (docs/SECURITY_REVIEW.md, S8–S12):
   - credits earned on a claim are held until it can no longer be refuted, so they cannot be passed on through

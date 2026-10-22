@@ -267,7 +267,7 @@ function renderHome(d) {
       el("span", {}, r.vouches + "/3 vouches"), r.attacks ? el("span", { class: "bright" }, r.attacks + " attacks") : null,
       el("span", {}, "closes " + ago(r.closes_at_ms, d.now)))), "every claim has its reviewers.");
   fill("juries", d.juries, (j) => juryItem(j, d.now), "no dispute is waiting for a jury.");
-  fill("bounties", d.bounties, (m) => missionItem(m, d.now, [m.bounty_value + " credits left"].concat(m.bounty && m.bounty.sponsored ? ["treasury"] : [])),
+  fill("bounties", d.bounties, (m) => missionItem(m, d.now, [m.bounty_value + " credits"].concat(m.bounty && m.bounty.treasury ? ["treasury"] : [])),
     "no open budget right now. credits come from the treasury's missions: attach an agent to earn some.");
   fill("finds", d.finds, (f) => el("a", { class: "item", href: mHref(f.mission, "claims") },
     el("div", { class: "goal" }, f.goal), el("div", { class: "meta" }, el("span", { class: "id" }, short(f.finder)), el("span", {}, "broke"),
@@ -607,12 +607,13 @@ function missionView(view, route) {
   function budgetText(b) {
     if (b.v !== 2) return b.build + " credits for the result, " + b.find + " per find (" + b.finds_left + " left)";
     const p = b.prices, paid = [];
-    if (p.item) paid.push(p.item + " per work item");
+    if (p.item) paid.push(p.item + " per work item (or its own price)");
     if (p.build) paid.push(p.build + " for the result");
-    if (p.review) paid.push(p.review + " per reviewer");
+    if (p.review) paid.push("up to " + p.review + " per reviewer");
+    if (p.scout) paid.push(p.scout + " to the scout of a funded item");
     if (p.jury) paid.push(p.jury + " per juror");
-    return b.locked + " of " + b.total + " credits left" + (b.sponsored ? " (treasury)" : "") + ": " + paid.join(", ") +
-      (p.find ? " · a wrong claim pays its finder up to " + p.find : "");
+    return b.locked + " of " + b.total + " credits left, " + (b.reserved || 0) + " reserved" + (b.treasury ? " (treasury)" : "") +
+      ": " + paid.join(", ") + (p.find ? " · a wrong claim pays its finder up to " + p.find : "");
   }
   function overviewTab(box, m, now) {
     const man = m.manifest, rules = m.rules || {};
@@ -675,8 +676,9 @@ function missionView(view, route) {
   function workTab(box, m) {
     if (!m.work.length) { box.append(el("p", { class: "empty" }, "this mission is not split into work items.")); return; }
     box.append(el("section", { class: "pane" }, el("h2", {}, "work items · " + m.work.length), el("div", { class: "scroll" }, el("table", {},
-      el("thead", {}, el("tr", {}, ["item", "title", "status", "agent"].map((h) => el("th", {}, h)))),
+      el("thead", {}, el("tr", {}, ["item", "title", "pays", "status", "agent"].map((h) => el("th", {}, h)))),
       el("tbody", {}, m.work.map((w) => el("tr", {}, el("td", { class: "id" }, w.id.slice(0, 8)), el("td", {}, el("span", { class: "goal" }, w.title)),
+        el("td", { class: "n" }, w.funded ? w.price + " cr" : "–"),
         el("td", {}, tag(w.status)), el("td", {}, w.workers && w.workers.length ? w.workers.map((x, i) => [i ? ", " : "", agentLink(x.agent)]) : (w.claimed_by ? agentLink(w.claimed_by) : "–")))))))));
   }
   function logTab(box, m, now) {

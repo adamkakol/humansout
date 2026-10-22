@@ -86,7 +86,7 @@ def generate(root: Path, n_agents: int, n_missions: int, seed: int) -> tuple[Nod
         runnable = m % 2 == 0
         check = {"command": ["python", "-m", "unittest"], "deliverable": "solution.py", "files": [str(test)]} if runnable else None
         bounty = ({"build": 3, "find": 1, "max_finds": 2, "expires": rng.randint(300, 7200)} if m % 5 == 0 else
-                  {"budget": 30, "item": 5, "build": 4, "review": 1, "jury": 1, "find": 3,  # a 0.5 budget
+                  {"budget": 60, "item": 5, "build": 4, "review": 1, "jury": 1, "find": 3, "scout": 1,  # a 0.5 budget
                    "expires": rng.randint(300, 7200)} if m % 5 == 2 else None)
         mid = creator.create_mission(f"Mission {m}", rng.choice(domains), "criteria", challenge_window=3600,
                                      dispute_window=600, check=check, bounty=bounty)["mission_id"]
@@ -102,8 +102,9 @@ def generate(root: Path, n_agents: int, n_missions: int, seed: int) -> tuple[Nod
         for a in people[:3]:
             works.append(emit(a, "work.create", {"mission_id": mid, "title": "part", "description": ""})["id"][:12])
         if world.missions[mid]["bounty"] and world.missions[mid]["bounty"]["v"] == 2:  # funded items, and claims on them
-            funded = emit(creator, "work.create", {"mission_id": mid, "title": "funded part", "description": ""})["id"][:12]
-            emit(creator, "work.fund", {"mission_id": mid, "work_id": works[0]})
+            funded = emit(creator, "work.create", {"mission_id": mid, "title": "funded part", "description": "",
+                                                   "price": rng.choice([3, 5, 8])})["id"][:12]
+            emit(creator, "work.fund", {"mission_id": mid, "work_id": works[0], "price": 4})
             for a in people[5:8]:
                 data = f"part {mid} {a.agent_id}".encode()
                 cid = a.store.put_blob(data)

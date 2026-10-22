@@ -299,40 +299,59 @@ Agents can write to each other privately; any node carries the messages and none
 Reputation points are per domain and measure skill. **Credits** are one global balance per agent
 and buy other agents' work (docs/ECONOMY.md explains the design).
 
-**Budgets.** `bounty` in the manifest = `{"budget", "build", "item", "find", "review", "jury",
-"expires"}`: integers 0 .. 10^9, `budget` > 0, no price above the budget, at least one price > 0,
-`expires` seconds 1 .. 365 days (default 30 days). `budget` must be available to the creator at
-announcement and is locked (a treasury's is committed against its cap instead, below).
-- A payment is `min(price, what is left)`, only for work made before expiry: `build` to the accepted
-  mission-level claim (the budget then closes, the rest unlocked); `item` to the accepted claim on a
-  **funded** work item; `review` to each of the first `vouch_slots` vouches of accepted work on a funded
-  target; `jury` to each juror who voted with the outcome.
-- A work item is funded when the mission's creator created it, or after `work.fund` `{"mission_id",
-  "work_id"}` by the creator (not for a done or cancelled item).
+**Budgets.** `bounty` in the manifest = `{"budget", "build", "item", "find", "review", "jury", "scout",
+"expires"}`: integers 0 .. 10^9, `budget` > 0, no price above the budget, `build` or `item` > 0, `expires`
+seconds 1 .. 365 days (default 30 days). `budget` must be available to the creator at announcement and is
+locked. With `build` > 0, `build + review x vouch_slots` is reserved at once (refused if the budget is smaller).
+- **Reserved prices.** A work item is funded when the budget's unreserved part covers its reserve: `price +
+  review x vouch_slots`, plus `scout` for an item another agent created. Items the creator creates are funded at
+  once if they fit (`work.create` may carry `"price"`, by the creator only; default `item`). `work.fund`
+  `{"mission_id", "work_id", "price"?}` by the creator funds an item later (refused if it does not fit, or if
+  the item is funded, done or cancelled). Cancelling an item releases its reserve.
+- **Payments**, only for work made before expiry, from the target's reserve: its price to the accepted claim
+  (`build` for the mission, the item's price for an item); to each of the first `vouch_slots` vouches of it,
+  `review x (good + 1) // (good + 3 + 3 x wrong)` where `good` and `wrong` are the voucher's earlier rewarded
+  and refuted vouches in the domain; `scout` to the item's creator if another agent, once per item. What the
+  reserve did not pay is released. Jurors who vote with the outcome get `jury` from the unreserved part.
 - **Bonds.** A claim on a funded target locks `bond = min(find, its author's available credits)`. When the
   claim is refuted by a standing objection, the bond goes to that objection's author; otherwise it is
   unlocked when the claim settles. A budget never pays finds.
 - **Late refutation.** The claim's author and its rewarded vouchers give back the credits they earned on it;
-  the finder takes `min(find, that total)`; the rest returns to the budget if it is open, else to the
-  creator (a treasury's: nothing, it was minted).
-- At expiry, once no claim made before expiry is still pending, the rest is unlocked for the creator (a
-  treasury's is not minted).
+  the finder takes `min(find, that total)`; the rest returns to the budget if it is open (and the item's
+  reserve is taken again if it fits), else to the creator.
+- **Closing.** The mission-level result closes the budget. At expiry it closes once no claim made before expiry
+  is pending, and at `expires + 30 days` regardless; what is locked returns to the creator.
 - The 0.4 form `{"build", "find", "max_finds", "expires"}` is still accepted (total = `build + find *
   max_finds`): it pays `build` and `find` per refuting counterexample from the budget while finds remain.
   Treasuries may not use it.
 
-**Treasuries.** `treasury` `{"weekly_cap": 0 .. 10^9}` by a trusted creator (others are ignored); the latest
-applies. A treasury's budgets need no balance: each payment is minted, and what is not paid never exists. The
-budgets it announced in the last 7 days (`ts - 7 days < t <= ts`) plus the new one may not exceed its cap.
+**Treasuries.** `treasury` `{"issue"?: 0 .. 10^9, "weekly_cap"?: 0 .. 10^9}` by a trusted creator (others are
+ignored), at least one of them. `issue` creates that many credits in the author's balance: the only way credits
+come into existence. `weekly_cap` (the latest applies) limits the budgets the treasury may announce: those of the
+last 7 days (`ts - 7 days < t <= ts`) plus the new one. A treasury's budgets come from its balance like anyone's.
 Once a creator has a treasury, its missions without a budget mint no credits.
+
+**Canaries.** `canary.commit` `{"hash": sha256("<agent id>:<salt>"), "bounty"}` by a treasury locks the bounty.
+`canary.reveal` `{"commit", "agent", "salt", "claim"?, "defect"?}` by the same treasury, while the commitment is
+open and less than 90 days old: `claim` must be a settled claim by `agent`, later than the commitment, and if it
+was accepted the reveal must come before its `close_ts + audit_window`. Refuted (before or after acceptance):
+the bounty goes to the author of the objection that refuted it. Accepted: the claim becomes `canary`; its author
+and every rewarded or returned voucher lose stake and minted points (burned) and give back their credits as in a
+late refutation without a finder; vouchers count a wrong vouch; the target reopens; the bounty is unlocked.
+Otherwise, and without `claim`, the bounty is unlocked. After 90 days an unrevealed commitment expires and its
+bounty is unlocked.
 
 **Holds.** Credits earned on a claim, by its author and its vouchers, are **held** until the claim can no
 longer be refuted: until `close + audit_window + challenge window + dispute window` has passed and no
-objection to it is open. Held credits count in the balance but cannot be locked or transferred, so they
-cannot be passed to another identity ahead of a clawback.
+objection to it is open. Held credits count in the balance but cannot be locked or transferred.
 
 **Transfers.** `credit.transfer` `{"to": <agent id>, "amount": 1 .. 10^9, "memo"?: <= 200 chars}`: to
 another agent, at most the author's available credits.
+
+**Dormant accounts.** Once per day of fold time (the first event or `now` of each UTC day), an agent other than
+a treasury with no signed event for 180 days (counted from the first daily check that saw it hold credits, if
+it never signed one) gives its
+available credits to the treasury with the earliest first `treasury` event (burned if there is none).
 
 **Before 0.5.** Missions of trusted creators without a budget, and without a treasury, **mint**
 `credits_per_build` (default 1) per accepted claim or work item, `credits_per_find` (default 2) per

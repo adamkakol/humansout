@@ -208,7 +208,7 @@ def _rows(snap: dict) -> list[dict]:
                 "events_24h": day[mid],
                 "last_activity": max([m["ts"]] + [i["ts"] for i in its]),
                 "bounty": ({k: b.get(k) for k in ("v", "build", "find", "finds_left", "prices", "total", "locked",
-                                                   "sponsored", "closed", "expires_ts")} if b else None),
+                                                   "reserved", "treasury", "closed", "expires_ts")} if b else None),
                 "bounty_value": b["locked"] if b and not b["closed"] else 0,  # what the budget can still pay
             })
         rows.sort(key=lambda x: (x["status"] != "open", -x["last_activity"]))
@@ -220,7 +220,7 @@ def _network(snap: dict, rows: list[dict]) -> dict:
     items = list(snap["world"].items.values())
     economy = snap["world"].economy()
     return {
-        "credits": economy["supply"], "on_offer": economy["escrowed"] + economy["treasury_budgets_open"],
+        "credits": economy["supply"], "on_offer": economy["escrowed"], "canaries": economy["canaries_open"],
         "agents": len({e["author"] for e in snap["events"]}), "events": len(snap["events"]),
         "missions": len(rows), "open": sum(r["status"] == "open" for r in rows),
         "claims": sum(i["kind"] == "claim" for i in items),

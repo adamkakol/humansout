@@ -199,31 +199,51 @@ def save_state(home: Path, state: dict) -> None:
 
 
 def _funded(mission: dict, target: str) -> bool:
-    return target == "mission" or bool(mission["work"].get(target, {}).get("funded"))
+    b = mission.get("bounty") or {}
+    if target == "mission":
+        return b.get("v") == 2 and b.get("mission_reserve", 0) > 0
+    return mission["work"].get(target, {}).get("reserve", 0) > 0
 
 
-def bounty_value(mission: dict, role: str, claim: dict | None = None) -> int:
-    """Credits an agent can expect for one piece of work here: build (the whole mission), item (a funded work item),
-    review (vouching for work that is accepted) or find (refuting a claim). In a 0.5 budget a find is paid by the
-    party that was wrong: the claim's bond, or for accepted work up to the find price of what it earned."""
+def bounty_value(mission: dict, role: str, claim: dict | None = None, work: dict | None = None) -> int:
+    """Credits an agent can expect for one piece of work here: build (the whole mission), item (a funded work item:
+    its reserved price), review (vouching for work that is accepted, before the weight of the reviewer's record) or
+    find (refuting a claim). In a 0.5 budget a find is paid by the party that was wrong: the claim's bond, or for
+    accepted work up to the find price of what it earned."""
     b = mission.get("bounty")
     if not b:
         return 0
-    prices = b.get("prices") or {"build": b["build"], "find": b["find"]}
     if role == "find":
         if b.get("v") == 2:
             if claim is None:
                 return 0
             if claim["status"] == "accepted":
                 earned = (claim.get("credits") or 0) + sum(v.get("credits") or 0 for v in claim["vouches"])
-                return min(prices["find"], earned)
+                return min(b["prices"]["find"], earned)
             return claim.get("bond") or 0
         return 0 if b["closed"] or not b["finds_left"] else b["find"]
     if b["closed"]:
         return 0
-    if role == "review" and claim is not None and not _funded(mission, claim["target"]):
-        return 0
-    return min(prices.get(role, 0), b["locked"])
+    if b.get("v") != 2:
+        return b["build"] if role == "build" else 0
+    if role == "item":
+        return (work.get("price") or 0) if work and work.get("reserve") else 0
+    if role == "build":
+        return b["prices"]["build"] if b.get("mission_reserve") else 0
+    if role == "review":
+        return b["prices"]["review"] if claim is None or _funded(mission, claim["target"]) else 0
+    return 0
+
+
+def expected_credits(world, m: dict, me: str, pays: int, odds: tuple) -> int:
+    """What this agent can expect from building here, in credits: the price, times its chance to be first (one in
+    1 + the passing claims and live workers ahead of it), times its record of accepted work in the domain, less
+    what it bonds times its record of refuted work. Agents pick the best of these: they optimize their reward."""
+    st = world.stats.get((me, m["domain"])) or {}
+    ok = (st.get("built", 0) + 1) / (st.get("built", 0) + st.get("refuted", 0) + 2)
+    b = m.get("bounty") or {}
+    bond = min((b.get("prices") or {}).get("find", 0), max(world.credits_available(me), 0)) if b.get("v") == 2 else 0
+    return round(pays * ok / (1 + sum(odds)) - (1 - ok) * bond)
 
 
 def budget_line(mission: dict) -> str:
@@ -235,15 +255,19 @@ def budget_line(mission: dict) -> str:
         return (f"Bounty: {b['build']} credits for the accepted result"
                 + (f", {b['find']} per reproduced find ({b['finds_left']} left)." if b["find"] else "."))
     p = b["prices"]
-    paid = [f"{p['item']} per accepted funded work item" if p["item"] else "",
-            f"{p['build']} for the accepted result of the whole mission" if p["build"] else "",
-            f"{p['review']} to each of the first {swarm_rule(mission, 'vouch_slots')} reviewers who vouch for work that is "
-            f"accepted" if p["review"] else "",
+    paid = ["each funded work item its own reserved price (shown with the item)" if mission["work"] else "",
+            f"{p['build']} for the accepted result of the whole mission" if b.get("mission_reserve") else "",
+            f"up to {p['review']} to each of the first {swarm_rule(mission, 'vouch_slots')} reviewers who vouch for "
+            f"funded work that is accepted (a newcomer gets a third; a clean record of accepted vouches raises it, "
+            f"each vouch for work later refuted lowers it)" if p["review"] else "",
             f"{p['jury']} per juror who votes with the outcome" if p["jury"] else ""]
-    return (f"Budget: {b['locked']} of {b['total']} credits left. It pays " + "; ".join(x for x in paid if x) + "."
+    return (f"Budget: {b['locked']} credits, {b['reserved']} reserved for funded work. It pays "
+            + "; ".join(x for x in paid if x) + "."
             + (f" A claim bonds up to {p['find']} of its author's credits: whoever refutes it takes them, so be "
                f"sure before you claim, and a real counterexample earns." if p["find"] else "")
-            + " Credits are paid after the work can no longer be refuted.")
+            + " Credits are paid after the work can no longer be refuted. Some claims are canaries: faulty work the "
+              "treasury planted to test reviewers. Vouching for one costs your stake and what you earned on it; "
+              "refuting one earns its bounty.")
 
 
 def in_active_hours(hours: tuple[int, int] | None, local_hour: int) -> bool:
@@ -358,14 +382,14 @@ def find_work(world, me: str, now: int, cfg: WatchConfig, state: dict, node_mess
                 left = [w for w in left if _may_try(state, f"{mid}:{w['id']}", now, cfg)]
                 if not left or any(c["target"] == "mission" and (not c["settled"] or c["status"] == "accepted") for c in mine):
                     continue
-                paid = [w for w in left if bounty_value(m, "item") and w.get("funded")]
+                paid = [w for w in left if w.get("reserve")]
                 assigned = suggest_item(world, m, me, paid or left, now)  # items the budget pays for first
             else:
                 if any(not c["settled"] or c["status"] == "accepted" for c in mine):
                     continue
                 # others building it, or a claim of theirs, never stop this agent: the prompt says who is on it
                 # and since when, and the agent judges its chance to be first with a correct result
-            pays = (bounty_value(m, "item") if assigned.get("funded") else 0) if assigned else bounty_value(m, "build")
+            pays = bounty_value(m, "item", work=assigned) if assigned else bounty_value(m, "build")
             if _may_try(state, mid, now, cfg) and pays >= cfg.min_bounty:
                 # how likely this agent is to be first with a correct result there: work where another agent's claim
                 # already passes its check is offered after work nobody has won yet (found in round 3 of the
@@ -375,6 +399,7 @@ def find_work(world, me: str, now: int, cfg: WatchConfig, state: dict, node_mess
                         len(_live_workers(assigned, now, me)) if assigned else
                         len([a for a, until in m["builders"].items() if until > now and a != me]))
                 build.append(Event("build", mid, None, {"bounty": pays, "odds": odds,
+                                                        "expected": expected_credits(world, m, me, pays, odds),
                                                         **({"suggested": assigned["id"]} if assigned else {})}))
     inbox = []
     if cfg.messages and node_messages is not None:
@@ -383,7 +408,7 @@ def find_work(world, me: str, now: int, cfg: WatchConfig, state: dict, node_mess
             inbox.append(Event("inbox", "inbox", None, {"count": len(fresh), "ids": fresh}))  # not about one mission
     # better-paying work first; claims with vouch slots left before those without; otherwise the order found
     review.sort(key=lambda e: (-e.detail["bounty"], -e.detail["slots_left"], e.detail["spread"]))
-    build.sort(key=lambda e: (-e.detail["bounty"], e.detail["odds"]))
+    build.sort(key=lambda e: (-e.detail["expected"], -e.detail["bounty"], e.detail["odds"]))
     audit.sort(key=lambda e: -e.detail["bounty"])
     first = [e for e in review if e.detail["natural"]]
     later = [e for e in review if not e.detail["natural"]]  # still offered: after this agent's build work
@@ -451,8 +476,9 @@ def _work_picture(world, m: dict, me: str, now: int, suggested: str | None, cli:
               + (" [you]" if a == me else "") for a, v in _live_workers(w, now)]
         claims = [_claim_line(world, m, world.items[i], now) for i in m["claims"]
                   if world.items[i]["target"] == w["id"] and not world.items[i]["settled"]]
-        pays = ((f" Pays {bounty_value(m, 'item')} credits." if w.get("funded") else " Not funded: points only.")
-                if bounty_value(m, "item") else "")
+        b = m.get("bounty") or {}
+        pays = ((f" Pays {w['price']} credits (reserved)." if w.get("reserve") else " Not funded: points only.")
+                if b.get("v") == 2 and not b.get("closed") else "")
         lines.append(f"- {w['id']}: {w['title']}.{pays} {w['description'][:240]} Working on it: "
                      f"{'; '.join(on) if on else 'nobody'}. Claims: {'; '.join(claims) if claims else 'none'}.")
     done = sum(1 for w in m["work"].values() if w["done_claim"])
@@ -509,6 +535,10 @@ def render_prompt(node, world, ev: Event, cfg: WatchConfig, workdir: Path) -> st
         if check else RULE_TEXT)
     if ev.kind in ("review", "build") and m:
         task += " " + budget_line(m)
+    if ev.kind == "build" and m and ev.detail.get("bounty"):
+        ahead = sum(ev.detail.get("odds") or ())
+        task += (f" Expected for you: about {ev.detail.get('expected', 0)} credits (pays {ev.detail['bounty']}; "
+                 f"{ahead} other agent(s) or passing claim(s) ahead of you; your record of accepted work counts).")
     if ev.kind == "review":
         task += " " + _review_picture(world, m, world.items.get(ev.item), node.agent_id, node.clock()) + " " + \
             SPLIT_OFF.format(cli=cli, mission=ev.mission)

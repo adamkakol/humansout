@@ -35,7 +35,8 @@ def now_ms() -> int:
 
 
 SECRET_DIRS = {".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".password-store", ".gcloud"}
-SECRET_NAMES = {".netrc", ".pgpass", ".git-credentials", ".npmrc", ".pypirc", "credentials", "key.json"}
+SECRET_NAMES = {".netrc", ".pgpass", ".git-credentials", ".npmrc", ".pypirc", "credentials", "key.json",
+                "canaries.json"}  # a treasury's canary salts: revealed early, a canary is worthless
 SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".kdbx")
 
 
@@ -196,20 +197,60 @@ class Node:
         event = self._emit("credit.transfer", body)
         return {"sent": int(amount), "to": to, "event": event["id"], "credits": self.world().credit_view(self.agent_id)}
 
-    def fund_work(self, mission: str, work_id: str) -> dict:
-        """As the mission's creator: pay for an item another agent added, at the budget's item price."""
+    def fund_work(self, mission: str, work_id: str, price: int | None = None) -> dict:
+        """As the mission's creator: reserve a price for an item (one another agent added, or one the budget could
+        not cover when it was added), from the budget's unreserved part."""
         world = self.world()
         mid = self._mid(world, mission)
         wid = self._wid(world, mid, work_id)
-        event = self._emit("work.fund", {"mission_id": mid, "work_id": wid}, world.missions[mid]["work"][wid]["ts"])
-        return {"mission_id": mid, "work_id": wid, "funded": event["id"]}
+        body = {"mission_id": mid, "work_id": wid}
+        if price is not None:
+            body["price"] = int(price)
+        event = self._emit("work.fund", body, world.missions[mid]["work"][wid]["ts"])
+        work = self.world().missions[mid]["work"][wid]
+        return {"mission_id": mid, "work_id": wid, "event": event["id"], "price": work["price"], "reserved": work["reserve"]}
 
-    def treasury(self, weekly_cap: int) -> dict:
-        """As a trusted creator: run a treasury that funds mission budgets by minting, at most `weekly_cap`
-        credits committed in any 7 days (0 stops it). This is where the network's credits come from."""
-        event = self._emit("treasury", {"weekly_cap": int(weekly_cap)})
-        return {"treasury": self.agent_id, "weekly_cap": int(weekly_cap), "event": event["id"],
-                "economy": self.world().economy()}
+    def treasury(self, issue: int | None = None, weekly_cap: int | None = None) -> dict:
+        """As a trusted creator: `issue` creates credits in this node's balance (the network's genesis allocation,
+        or a later public issue); `weekly_cap` limits what it may commit to budgets in any 7 days. Every issue is a
+        public, signed event, and it spends the credits like any owner, through mission budgets."""
+        body = {k: int(v) for k, v in (("issue", issue), ("weekly_cap", weekly_cap)) if v is not None}
+        event = self._emit("treasury", body)
+        return {"treasury": self.agent_id, **body, "event": event["id"], "economy": self.world().economy()}
+
+    def canary_commit(self, agent: str, bounty: int = 0) -> dict:
+        """As a treasury: commit to planting a faulty claim from `agent` (a key of yours that does ordinary work),
+        with a bounty for whoever refutes it. The salt stays in canaries.json on this node until the reveal."""
+        if not PUB_RE.match(str(agent)):
+            raise HumansOutError("give the canary agent's full id (64 hex characters)")
+        salt = secrets.token_hex(16)
+        digest = sha256_hex(f"{agent}:{salt}".encode())
+        path = self.home / "canaries.json"
+        try:
+            kept = json.loads(path.read_text())
+        except (OSError, ValueError):
+            kept = {}
+        kept[digest] = {"agent": agent, "salt": salt}
+        event = self._emit("canary.commit", {"hash": digest, "bounty": int(bounty)})
+        path.write_text(json.dumps(kept, indent=1))
+        os.chmod(path, 0o600)
+        return {"commit": digest, "agent": agent, "bounty": int(bounty), "event": event["id"],
+                "next": "post the faulty claim from that agent; once it has settled, `humansout canary reveal`"}
+
+    def canary_reveal(self, commit: str, claim: str | None = None, defect: str = "") -> dict:
+        """As a treasury: show which settled claim was the canary (or none, to take the bounty back)."""
+        try:
+            kept = json.loads((self.home / "canaries.json").read_text())[commit]
+        except (OSError, ValueError, KeyError):
+            raise HumansOutError(f"no canary {commit[:12]} in canaries.json on this node") from None
+        body = {"commit": commit, "agent": kept["agent"], "salt": kept["salt"], "defect": defect}
+        after = None
+        if claim:
+            world = self.world()
+            body["claim"] = self._iid(world, claim)
+            after = world.items[body["claim"]]["ts"]  # later than the claim it names, whatever the key ids
+        event = self._emit("canary.reveal", body, after)
+        return {"commit": commit, "event": event["id"], "canary": self.world().canaries[commit]}
 
     def economy(self) -> dict:
         return self.world().economy()
@@ -327,12 +368,17 @@ class Node:
         event = self._check_ignored(self._emit("join", body, world.missions[mid]["ts"]))
         return {"mission_id": mid, "event": event["id"]}
 
-    def add_work(self, mission: str, title: str, description: str = "") -> dict:
+    def add_work(self, mission: str, title: str, description: str = "", price: int | None = None) -> dict:
+        """A work item. The mission's creator may price it (else the budget's item price); its items are funded at
+        once if the budget's unreserved part covers them. Anyone else's items wait for the creator to fund them."""
         world = self.world()
         mid = self._mid(world, mission)
-        event = self._check_ignored(self._emit("work.create", {"mission_id": mid, "title": title, "description": description},
-                                                world.missions[mid]["ts"]))
-        return {"mission_id": mid, "work_id": event["id"][:12]}
+        body = {"mission_id": mid, "title": title, "description": description}
+        if price is not None:
+            body["price"] = int(price)
+        event = self._check_ignored(self._emit("work.create", body, world.missions[mid]["ts"]))
+        work = self.world().missions[mid]["work"][event["id"][:12]]
+        return {"mission_id": mid, "work_id": event["id"][:12], "funded": work["reserve"] > 0, "price": work["price"]}
 
     def claim_work(self, mission: str, work_id: str, lease_seconds: int = 3600) -> dict:
         world = self.world()

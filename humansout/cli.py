@@ -79,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     wa.add_argument("mission")
     wa.add_argument("--title", required=True)
     wa.add_argument("--description", default="")
+    wa.add_argument("--price", type=int, help="as the mission's creator: what this item pays (default: the budget's item price)")
     wc = w.add_parser("claim")
     wc.add_argument("mission")
     wc.add_argument("work")
@@ -90,9 +91,10 @@ def build_parser() -> argparse.ArgumentParser:
     wx.add_argument("mission")
     wx.add_argument("work")
     wx.add_argument("--reason", default="")
-    wf = w.add_parser("fund", help="as the mission's creator: pay for an item another agent added, at the item price")
+    wf = w.add_parser("fund", help="as the mission's creator: reserve a price for an item (one another agent added)")
     wf.add_argument("mission")
     wf.add_argument("work")
+    wf.add_argument("--price", type=int, help="default: the budget's item price")
 
     a = sub.add_parser("artifact", help="artifacts").add_subparsers(dest="action", required=True)
     ap = a.add_parser("publish")
@@ -202,8 +204,19 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("amount", type=int)
     tr.add_argument("--memo", default="")
     sub.add_parser("economy", help="the money supply: credits in existence, open budgets, treasuries and their caps")
-    ty = sub.add_parser("treasury", help="as a trusted creator: fund mission budgets by minting, under a weekly cap")
-    ty.add_argument("--weekly-cap", type=int, required=True, help="most credits committed to budgets in any 7 days (0 stops)")
+    ty = sub.add_parser("treasury", help="as a trusted creator: issue the network's credits (a public, signed event)")
+    ty.add_argument("--issue", type=int, help="credits to create in this node's balance (the genesis allocation)")
+    ty.add_argument("--weekly-cap", type=int, help="most credits this treasury may commit to budgets in any 7 days")
+    cy = sub.add_parser("canary", help="as a treasury: plant faulty claims to test reviewers").add_subparsers(
+        dest="action", required=True)
+    cc = cy.add_parser("commit", help="commit to a canary from one of your agents, with a bounty for whoever catches it")
+    cc.add_argument("--agent", required=True, help="the id of the agent that will post the faulty claim")
+    cc.add_argument("--bounty", type=int, default=0)
+    cr = cy.add_parser("reveal", help="show which settled claim was the canary (no --claim: it was never planted)")
+    cr.add_argument("commit")
+    cr.add_argument("--claim")
+    cr.add_argument("--defect", default="", help="what was wrong with it")
+    cy.add_parser("list", help="the canaries this network knows")
     fd = sub.add_parser("finds", help="the hall of breaks: reproduced counterexamples this node knows")
     fd.add_argument("--markdown", action="store_true", help="print a shareable Markdown list")
 
@@ -365,6 +378,7 @@ def _budget_args(p) -> None:
     g.add_argument("--pay-item", type=int, help="credits per accepted work item (items you add, or fund)")
     g.add_argument("--pay-review", type=int, help="credits per reviewer who vouched for accepted work (first vouch_slots)")
     g.add_argument("--pay-jury", type=int, help="credits per juror who voted with the outcome")
+    g.add_argument("--pay-scout", type=int, help="credits to whoever added an item you funded, when it is done")
     g.add_argument("--pay-find", type=int, help="the price of being wrong: a claim bonds up to this much of its author's "
                                                "credits, paid to whoever refutes it (never from the budget)")
     g.add_argument("--budget-expires", "--bounty-expires", dest="bounty_expires", type=int,
@@ -377,9 +391,10 @@ def _budget_args(p) -> None:
 def _bounty_from_args(args) -> dict | None:
     if args.budget is not None:
         values = {"budget": args.budget, "build": args.pay_build, "item": args.pay_item, "find": args.pay_find,
-                  "review": args.pay_review, "jury": args.pay_jury, "expires": args.bounty_expires}
+                  "review": args.pay_review, "jury": args.pay_jury, "scout": args.pay_scout, "expires": args.bounty_expires}
         return {k: v for k, v in values.items() if v is not None}
-    if any(v is not None for v in (args.pay_build, args.pay_item, args.pay_find, args.pay_review, args.pay_jury)):
+    if any(v is not None for v in (args.pay_build, args.pay_item, args.pay_find, args.pay_review, args.pay_jury,
+                                   args.pay_scout)):
         raise HumansOutError("prices need a --budget: the credits the mission may spend in all")
     values = {"build": args.bounty_build, "find": args.bounty_find, "max_finds": args.max_finds,
               "expires": args.bounty_expires}
@@ -428,13 +443,13 @@ def run(args) -> object:
         return node.mission_state(args.mission)
     if cmd == "work":
         if action == "add":
-            return node.add_work(args.mission, args.title, args.description)
+            return node.add_work(args.mission, args.title, args.description, args.price)
         if action == "claim":
             return node.claim_work(args.mission, args.work, args.lease)
         if action == "cancel":
             return node.cancel_work(args.mission, args.work, args.reason)
         if action == "fund":
-            return node.fund_work(args.mission, args.work)
+            return node.fund_work(args.mission, args.work, args.price)
         return node.release_work(args.mission, args.work)
     if cmd == "artifact":
         if action == "publish":
@@ -486,7 +501,15 @@ def run(args) -> object:
     if cmd == "economy":
         return node.economy()
     if cmd == "treasury":
-        return node.treasury(args.weekly_cap)
+        if args.issue is None and args.weekly_cap is None:
+            raise HumansOutError("give --issue (credits to create) or --weekly-cap")
+        return node.treasury(args.issue, args.weekly_cap)
+    if cmd == "canary":
+        if action == "commit":
+            return node.canary_commit(args.agent, args.bounty)
+        if action == "reveal":
+            return node.canary_reveal(args.commit, args.claim, args.defect)
+        return sorted(node.world().canaries.values(), key=lambda c: c["ts"])
     if cmd == "finds":
         from . import dashboard
         rows = dashboard.finds(node.store, node.clock())

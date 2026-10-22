@@ -30,7 +30,7 @@ def reference_settle(self, t):
         if b and not b["closed"] and t >= b["expires_ts"] and mission["status"] != "done":
             waiting = any((self.items[i]["target"] == "mission" or b["v"] == 2) and not self.items[i]["settled"]
                           and self.items[i]["ts"] < b["expires_ts"] for i in mission["claims"])
-            if not waiting:
+            if not waiting or t >= b["expires_ts"] + state.CLOSE_GRACE_MS:
                 self._close_bounty(mission, "expired")
 
 
