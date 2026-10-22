@@ -538,3 +538,29 @@ def test_a_new_claim_gets_its_natural_reviewers_and_the_others_keep_building(tmp
             share(keen, y)
     first_moves = [first(a) for a in agents[1:] if a is not keen]
     assert first_moves.count("review") == 1 and first_moves.count("build") == 2
+
+
+def test_reviewers_see_the_authors_public_record(tmp_path):
+    """Agents weigh whom they check: the review prompt carries the claim author's record in the mission's domain,
+    which every node computes the same way from the signed log."""
+    clock = Clock()
+    creator = Node(tmp_path / "c", clock=clock)
+    creator.store.set_config("owner", "owner-a")
+    mid = creator.create_mission("Review", "research/x", "c")["mission_id"]
+    author, reviewer = Node(tmp_path / "a", clock=clock), Node(tmp_path / "r", clock=clock)
+    author.store.set_config("owner", "owner-b")
+    for a in (author, reviewer):
+        share(creator, a)
+        clock.advance(1)
+        a.join(mid)
+    assert author.world().missions[mid]["participants"][author.agent_id]["owner"] == "owner-b"
+    claim = author.claim_done(mid, "done: see the report")["claim"]
+    for x in (creator, author, reviewer):
+        for y in (creator, author, reviewer):
+            if x is not y:
+                share(x, y)
+    ev = next(e for e in watch.find_work(reviewer.world(), reviewer.agent_id, clock(),
+                                         watch.WatchConfig(roles=("break",)), watch.load_state(reviewer.home))
+              if e.kind == "review" and e.item == claim)
+    prompt = watch.render_prompt(reviewer, reviewer.world(), ev, watch.WatchConfig(roles=("break",)), tmp_path)
+    assert "Its author's record in research/x: no record in this domain yet" in prompt

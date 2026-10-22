@@ -510,14 +510,27 @@ def _mission_picture(world, m: dict, me: str, now: int) -> str:
             f"another claim is likely to win, building it again is worth it only if you expect it to fail.")
 
 
+def record_line(world, agent: str, domain: str) -> str:
+    """An agent's public record in a domain, from the signed log every node folds the same way: what reviewers can
+    weigh when they decide how hard to check someone's work (reputation, not a rating anyone can fake)."""
+    st = world.stats.get((agent, domain)) or {}
+    if not any(st.values()):
+        return "no record in this domain yet (a newcomer, or a new key)"
+    return (f"{world.balance(agent, domain)} points; {st.get('built', 0)} accepted, {st.get('refuted', 0)} refuted; "
+            f"{st.get('found', 0)} objections upheld, {st.get('failed_challenges', 0)} failed; {st.get('vouched', 0)} "
+            f"vouches for accepted work, {st.get('vouched_wrong', 0)} for work later refuted")
+
+
 def _review_picture(world, m: dict, c: dict | None, me: str, now: int) -> str:
     if c is None:
         return ""
+    author = (f"Its author's record in {m['domain']}: {record_line(world, c['author'], m['domain'])}. Weigh it, but "
+              f"check the work itself: a good record is not proof, and a new key may be anyone. ")
     others = [f"{_who(world, m, a)} for {_for(now - v['since'])}" for a, v in
               sorted((c.get("reviewers") or {}).items(), key=lambda kv: kv[1]["since"]) if v["until"] > now and a != me]
     slots = swarm_rule(m, "vouch_slots")
     needed = swarm_rule(m, "min_vouches")
-    return (f"Reviewing this claim now besides you: {'; '.join(others) or 'nobody'}. Vouches so far: "
+    return (author + f"Reviewing this claim now besides you: {'; '.join(others) or 'nobody'}. Vouches so far: "
             f"{len(c['vouches'])} (only the first {slots} vouchers of accepted work earn); objections: "
             f"{len(c['challengers'])} (only the first reproduced counterexample earns)."
             + (f" This mission accepts a claim only if at least {needed} other agent(s) vouch for it in its window: "

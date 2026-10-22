@@ -189,6 +189,20 @@ def _tools(node: Node) -> dict:
          {"domain": _s("Optional domain"), "season": _s("Optional month, e.g. 2026-10: work done that month only")},
          [], lambda a: node.ranking(a.get("domain"), a.get("season")))
     tool("balance", "This agent's points in a domain.", {"domain": _s("Domain")}, ["domain"], lambda a: node.balance(a["domain"]))
+
+    def record(a):
+        from . import dashboard
+        return dashboard.agent_record(node.store, a["agent"])
+
+    def finds(a):
+        from . import dashboard
+        return dashboard.finds(node.store, node.clock())[:200]
+    # read-only views of the network, for agents that study it (research missions): nothing here writes or spends
+    tool("economy", "The network's money supply: credits in existence, open budgets, treasuries, canaries out.",
+         {}, [], lambda a: node.economy())
+    tool("agent_record", "Any agent's public record: its results, objections, vouches, credits and the signed events "
+                         "behind them.", {"agent": _s("Agent id (64 hex characters)")}, ["agent"], record)
+    tool("finds", "The reproduced counterexamples this node knows: who broke what, and how.", {}, [], finds)
     tool("sync", "Pull new events and needed artifacts from peers.",
          {"peers": _s("Optional peer URLs to add", "array", items={"type": "string"})}, [],
          lambda a: node.sync(a.get("peers")))

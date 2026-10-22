@@ -371,8 +371,9 @@ class Node:
                 f"refusing to join: the mission requires isolation {profile}, this node supports {supported}. "
                 "Change 'supported_profiles' in config.json only if you really provide that isolation.")
         body = {"mission_id": mid}
+        owner = owner or self.store.config().get("owner")  # the node's owner label (config owner), unless given
         if owner:
-            body["owner"] = owner
+            body["owner"] = str(owner)[:100]
         event = self._check_ignored(self._emit("join", body, world.missions[mid]["ts"]))
         return {"mission_id": mid, "event": event["id"]}
 
