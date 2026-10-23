@@ -554,6 +554,46 @@ def _mission_picture(world, m: dict, me: str, now: int) -> str:
             f"another claim is likely to win, building it again is worth it only if you expect it to fail.")
 
 
+def own_work(world, me: str, mids, now: int, limit: int = 15) -> str:
+    """What this agent did itself in these missions, from the signed log. Every turn is a fresh session and notes are
+    incomplete: in the research mission three agents denied claims their own keys had signed, so they could not
+    answer the reviews of them (23 October)."""
+    parts = []
+    for mid in mids:
+        m = world.missions.get(mid)
+        if not m:
+            continue
+        rows = []
+        for it in world.items.values():
+            if it["mission"] != mid or it["author"] != me:
+                continue
+            if it["kind"] == "claim":
+                target = ("the whole mission" if it["target"] == "mission" else
+                          f"item {it['target']} ({(m['work'].get(it['target']) or {}).get('title', '')[:60]})")
+                extra = ([f"{len(it['vouches'])} vouch(es)"] if it["vouches"] else []) + (
+                    ["objections " + ", ".join(x[:12] for x in it["challengers"])] if it["challengers"] else []) + (
+                    [f"window closes in {_for(it['close_ts'] - now)}"] if not it["settled"] else [])
+                rows.append((it["ts"], f"claim {it['id'][:12]} on {target}: {it['status']}"
+                                       + (f" ({'; '.join(extra)})" if extra else "")))
+            else:
+                t = world.items.get(it["target"])
+                rows.append((it["ts"], f"objection {it['id'][:12]} to {(t or {}).get('kind', 'item')} {it['target'][:12]}"
+                                       + (f" by agent {t['author'][:8]}" if t else "") + f": {it['status']}"))
+        for w in m["work"].values():
+            if any(x["author"] == me for x in w.get("endorsements", [])):
+                rows.append((w["ts"], f"endorsed item {w['id']} ({w['title'][:60]}): "
+                                      + ("funded" if w.get("reserve") or w.get("pool") else "not funded yet")))
+            lease = (w.get("workers") or {}).get(me)
+            if lease and lease["until"] > now:
+                rows.append((lease["since"], f"working on item {w['id']} ({w['title'][:60]}) for {_for(now - lease['since'])}"))
+        rows.sort(key=lambda r: -r[0])
+        head = (f"Your own work in mission {mid[:12]}, from the signed log under your key {me[:8]} (yours even if your "
+                f"notes do not mention it)")
+        more = f"; and {len(rows) - limit} more (agent_record)" if len(rows) > limit else ""
+        parts.append(head + ": " + ("; ".join(r[1] for r in rows[:limit]) + more if rows else "none yet") + ".")
+    return " ".join(parts)
+
+
 def record_line(world, agent: str, domain: str) -> str:
     """An agent's public record in a domain, from the signed log every node folds the same way: what reviewers can
     weigh when they decide how hard to check someone's work (reputation, not a rating anyone can fake)."""
@@ -623,6 +663,14 @@ def render_prompt(node, world, ev: Event, cfg: WatchConfig, workdir: Path) -> st
                      + (f" and {len(open_items) - 12} more." if len(open_items) > 12 else "."))
         else:
             task += " " + _mission_picture(world, m, node.agent_id, node.clock())
+    if ev.kind == "inbox":  # the missions the messages are about, else those where this agent's work is pending
+        ids = set(ev.detail.get("ids", []))
+        mids = (sorted({x["mission"] for x in world.messages if x["id"] in ids and x.get("mission")})
+                or sorted({i["mission"] for i in world.items.values() if i["author"] == node.agent_id and not i["settled"]}))
+        if mids:
+            task += " " + own_work(world, node.agent_id, mids[:3], node.clock())
+    elif m:
+        task += " " + own_work(world, node.agent_id, [ev.mission], node.clock())
     from .repo import is_repo_mission
     if is_repo_mission(check):
         task += " " + REPO_HINT.format(cli=cli, mission=ev.mission)

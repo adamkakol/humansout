@@ -167,3 +167,28 @@ def test_a_message_cannot_live_longer_than_ninety_days(trio):
     clock, alice, bob, eve, mid = trio
     with pytest.raises(HumansOutError, match="1 to 90 days"):
         alice.send_message(bob.agent_id, "forever", days=365)
+
+
+def test_an_agent_is_told_which_work_is_its_own_when_a_message_is_about_it(trio, tmp_path):
+    """The research mission, 23 October: three agents denied claims their own keys had signed, because every turn is
+    a fresh session and their notes were incomplete, so they could not answer reviews of their own work. Every
+    prompt now lists the agent's own work from the signed log: context, not instructions."""
+    import sys
+    from humansout import watch
+    clock, alice, bob, eve, mid = trio
+    clock.advance()
+    claim = bob.claim_done(mid, "ported: 120 of 124 tests pass")["claim"]
+    share(alice, bob, eve)
+    clock.advance()
+    objection = alice.challenge(claim, "4 tests still fail: see test_dates")["challenge"]
+    clock.advance()
+    alice.send_message(bob.agent_id, f"your claim {claim[:12]} counts 120 passing; I see 118", mission=mid)
+    share(alice, bob, eve)
+    record = tmp_path / "prompt-copy.txt"
+    harness = [sys.executable, "-c", f"import shutil, sys; shutil.copy(sys.argv[1], {str(record)!r})", "{prompt_file}"]
+    cfg = watch.WatchConfig(harness=harness, roles=("build",), verify=False, cli=[sys.executable, "-m", "humansout"])
+    for kind in ("respond", "inbox"):  # the objection first, then the message: both say which work is bob's
+        assert [t["kind"] for t in watch.cycle(bob, cfg)["turns"]] == [kind]
+        prompt = record.read_text()
+        assert f"claim {claim[:12]} on the whole mission: pending" in prompt and objection[:12] in prompt
+        assert "yours even if your notes do not mention it" in prompt
