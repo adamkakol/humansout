@@ -490,6 +490,9 @@ class World:
             ce["credits"] = cut
         rest, creator = clawed - cut, mission["creator"]
         self.credits[creator] = self.credit(creator) + rest
+        if rest:  # logged too: without it the log showed all of the clawback burned (found by the research mission)
+            self.credit_log.append({"mission": mission["id"], "kind": "clawback (returned)", "amount": rest,
+                                    "to": creator, "from": None, "item": claim["id"]})
         if rest and not b["closed"]:
             b["locked"] += rest
             self.credits_locked[creator] = self.credits_locked.get(creator, 0) + rest
@@ -1501,8 +1504,10 @@ class World:
         for v in claim["vouches"]:
             if v["status"] in ("rewarded", "returned"):
                 self._move(v["author"], finder, domain, v["stake"] + v["minted"])
-                if v["credits"] and not v2:
+                if v["credits"] and not v2:  # out of circulation, as the log says
                     self.credits[v["author"]] = self.credit(v["author"]) - v["credits"]
+                    self.credit_log.append({"mission": mission["id"], "kind": "clawback (refuted late)",
+                                            "amount": v["credits"], "to": None, "from": v["author"], "item": v["id"]})
                 vs = self._stat(v["author"], domain)
                 vs["vouched"], vs["vouched_wrong"] = vs["vouched"] - 1, vs["vouched_wrong"] + 1
                 v["status"] = "lost"

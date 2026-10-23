@@ -39,6 +39,15 @@ def net(tmp_path):
     return clock, n, tmp_path, test
 
 
+@pytest.fixture(autouse=True)
+def every_credit_movement_is_logged(request):
+    from test_budget import assert_the_log_gives_every_balance
+    n = request.getfixturevalue("net")[1] if "net" in request.fixturenames else None
+    yield
+    if n is not None:
+        assert_the_log_gives_every_balance(n["faucet"].world())
+
+
 def runnable(node, test, **kw):
     return node.create_mission("Write slugify(text)", "software/python", "ASCII slugs", challenge_window=100,
                                dispute_window=5, check={"command": ["python", "-m", "unittest"], "deliverable": "slugify.py",
@@ -235,3 +244,27 @@ def test_credits_from_refutable_work_cannot_be_spent_yet(net):
     clock.advance(3600 + 106)  # the audit window and a last objection's windows are over
     assert credits(n["alice"], n["alice"])["available"] == 10
     runnable(n["alice"], test, bounty={"build": 6})
+
+
+def test_a_late_refutation_logs_what_each_voucher_gives_back(net):
+    """A minted vouch credit taken back when the work it vouched for is refuted in the audit window was missing from
+    the credit log (the research mission's agents found the 0.5 return missing; the 0.4 path had the same gap)."""
+    clock, n, tmp, test = net
+    for node in n.values():
+        node.store.set_config("credits_per_build", 10)
+    mid = runnable(n["faucet"], test, rules={"audit_window": 3600, "vouch_slots": 1})
+    share(*n.values())
+    claim = build(n, "alice", mid, tmp, "v1")
+    n["bob"].join(mid)
+    n["bob"].vouch(claim, "ran the check: it passes")
+    share(*n.values())
+    clock.advance(101)
+    assert n["faucet"].world().credit(n["bob"].agent_id) == 1  # the vouch earned its minted credit
+    n["carol"].join(mid)
+    ch = n["carol"].challenge(claim, "fails on an edge case", counterexample=[edge_test(tmp, "carol")], preflight=False)
+    share(*n.values())
+    reproduce(n.values(), ch["challenge"])
+    clock.advance(10)
+    world = n["faucet"].world()
+    assert world.items[claim]["status"] == "refuted_late" and world.credit(n["bob"].agent_id) == 0
+    assert [e["amount"] for e in world.credit_log if e["from"] == n["bob"].agent_id] == [1]

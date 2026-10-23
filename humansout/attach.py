@@ -191,10 +191,14 @@ def attach(node, hub: str = DEFAULT_HUB, service: bool = False, dry_run: bool = 
     node.store.add_peer(hub)
     node.store.set_config("watch_profile", p)
     trusted = hub_key(hub)
-    if trusted and node.store.config().get("trusted_creators") in (None, ["*"]):
-        # count points and credits the way the hub does: only its missions mint (experiment mode trusts everyone)
-        node.store.set_config("trusted_creators", [trusted])
-        out["trusted_creators"] = [trusted]
+    if node.store.config().get("trusted_creators") in (None, [], ["*"]):
+        # count points and credits the way the hub does: only its missions mint (experiment mode trusts everyone).
+        # A hub that cannot be asked now leaves nobody minting, not everybody (found by the research mission)
+        node.store.set_config("trusted_creators", [trusted] if trusted else [])
+        out["trusted_creators"] = [trusted] if trusted else []
+        if not trusted:
+            out["warning"] = ("could not learn the hub's key: until you run attach again, no mission mints points or "
+                              "credits in this node's view")
     if trusted and not node.store.config().get("time_witnesses") and hub_witnesses(hub, trusted):
         # time events the way the hub does: by when it first saw them, so backdating wins nothing (witness.py)
         node.store.set_config("time_witnesses", [trusted])

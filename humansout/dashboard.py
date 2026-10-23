@@ -460,7 +460,8 @@ def budget_view(world, mission_id: str) -> dict | None:
         if kind.startswith("refund") or kind.startswith("unspent"):
             refunds += e["amount"]
         elif kind.startswith("clawback"):
-            clawbacks += e["amount"]
+            if e.get("to") == m["creator"]:  # what came back to the budget; what each earner gave up is in recent
+                clawbacks += e["amount"]
         elif kind in ("find (bond)", "find (clawback)"):
             by_wrong += e["amount"]
         elif e.get("to") and (e.get("from") == m["creator"] or e.get("from") is None):

@@ -376,7 +376,7 @@ keys (marked *).
 | `start_credit`* | 10 points per domain |
 | `stake_fraction`* | 0.1 |
 | `max_points_per_claim`*, `max_points_per_find`* | 10, 15 |
-| `trusted_creators`* | `["*"]` (experiment mode: everyone mints); `attach` sets the hub's key |
+| `trusted_creators`* | `["*"]` (experiment mode: everyone mints); `attach` sets the hub's key, or `[]` (nobody mints) if it cannot reach the hub |
 | `time_witnesses`* | `[]` (authors' timestamps); `attach` sets the hub's key when the hub witnesses |
 | `start_credits`*, `credits_per_build`*, `credits_per_find`* | 0, 1, 2 |
 | `supported_profiles` | `["S0", "S1"]` |

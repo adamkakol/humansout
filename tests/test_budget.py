@@ -39,6 +39,27 @@ def net(tmp_path):
     return clock, n, tmp_path, test
 
 
+@pytest.fixture(autouse=True)
+def every_credit_movement_is_logged(request):
+    """Replayed from each agent's starting credits, the credit log gives every balance: no movement goes unrecorded.
+    (The research mission's agents found a late refutation's return to the mission's creator missing from it.)"""
+    n = request.getfixturevalue("net")[1] if "net" in request.fixturenames else None
+    yield
+    if n is not None:
+        assert_the_log_gives_every_balance(n["treasury"].world())
+
+
+def assert_the_log_gives_every_balance(world):
+    start, moved = int(world.config.get("start_credits", 0)), {}
+    for e in world.credit_log:
+        if e["kind"].startswith(("refund", "unspent")):  # a budget unlocking what it held: no balance moves
+            continue
+        for agent, sign in ((e.get("to"), 1), (e.get("from"), -1)):
+            if agent:
+                moved[agent] = moved.get(agent, 0) + sign * e["amount"]
+    assert {a: v - start for a, v in world.credits.items() if v != start} == {a: d for a, d in moved.items() if d}
+
+
 def mission(node, test, budget=None, **rules):
     return node.create_mission("Write slugify(text)", "software/python", "ASCII slugs", challenge_window=100,
                                dispute_window=5, check={"command": ["python", "-m", "unittest"],
@@ -213,6 +234,9 @@ def test_a_late_refutation_pays_the_finder_from_what_the_wrong_work_earned(net):
     assert credits(n, "dave")["credits"] == 54  # the find price, out of the 11 the wrong work earned
     assert credits(n, "alice")["locked"] == 36  # the other 7 went back into the budget,
     assert world.missions[mid]["work"][wid]["reserve"] == 13  # and the item's price is reserved again
+    from humansout import dashboard
+    view = dashboard.budget_view(world, mid)  # 7 came back to the budget; the finder's 4 was paid by the wrong work
+    assert view["clawbacks"] == 7 and view["paid_by_wrong_claims"] == 4
     second = build(n, "carol", mid, tmp, "v2", work_id=wid)
     clock.advance(101 + 3600 + 106)
     assert n["treasury"].world().items[second]["credits"] == 10

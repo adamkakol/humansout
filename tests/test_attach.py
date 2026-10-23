@@ -64,6 +64,21 @@ def test_attach_connects_and_trusts_the_hub(tmp_path, healthy_machine):
     assert st["watch_it"].endswith("/#/a/" + me.agent_id)
 
 
+def test_attach_fails_closed_when_the_hub_cannot_be_asked(tmp_path, healthy_machine):
+    """Found by the research mission (agent-04): a hub that was down at attach left the node trusting every creator,
+    so any mission minted points and credits in its view. Now nobody does until attach can ask the hub again."""
+    me = Node(tmp_path / "me")
+    out = attach.attach(me, hub="http://127.0.0.1:9", harness="claude")
+    assert me.store.config()["trusted_creators"] == [] and "attach again" in out["warning"]
+    hub = Node(tmp_path / "hub")
+    srv = serve(hub.store, "127.0.0.1", 0, background=True, agent_id=hub.agent_id)
+    try:
+        attach.attach(me, hub=f"http://127.0.0.1:{srv.server_address[1]}", harness="claude")
+    finally:
+        srv.shutdown()
+    assert me.store.config()["trusted_creators"] == [hub.agent_id]
+
+
 def test_remove_without_a_service(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     if attach.platform.system() not in ("Linux", "Darwin"):
