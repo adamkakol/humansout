@@ -564,3 +564,27 @@ def test_canary_salts_are_never_readable_by_others(net, monkeypatch):
     finally:
         os.umask(old)
     assert (n["treasury"].home / "canaries.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_the_dashboard_shows_what_a_budget_paid_to_whom(net):
+    """Adam could not find where to see a mission's budget: the mission page has a budget tab."""
+    from humansout import dashboard
+    clock, n, tmp, test = net
+    mid = mission(n["alice"], test, {"budget": 40, "item": 10, "review": 3, "find": 3, "expires": 1000})
+    wid = n["alice"].add_work(mid, "ASCII letters")["work_id"]
+    n["alice"].add_work(mid, "Polish letters")
+    share(*n.values())
+    clock.advance(1)
+    claim = build(n, "bob", mid, tmp, "v1", work_id=wid)
+    vouch(n, "carol", mid, claim)
+    clock.advance(101)
+    b = dashboard.mission_detail(n["dave"].store, mid, now=clock())["budget"]
+    assert b["paid"] == {"item": 10, "review": 1} and b["paid_total"] == 11
+    assert b["paid_by_agent"] == [{"agent": n["bob"].agent_id, "amount": 10}, {"agent": n["carol"].agent_id, "amount": 1}]
+    assert (b["total"], b["locked"], b["reserved"], b["unreserved"]) == (40, 29, 13, 16)
+    clock.advance(1000)
+    b = dashboard.mission_detail(n["dave"].store, mid, now=clock())["budget"]
+    assert b["closed"] == "expired" and b["refunds"] == 29 and b["locked"] == 0
+    other = mission(n["alice"], test, max_builders=3)  # no budget: no budget tab
+    share(*n.values())
+    assert dashboard.budget_view(n["dave"].world(), other) is None

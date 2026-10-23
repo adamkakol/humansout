@@ -420,7 +420,8 @@ def make_handler(store: Store, agent_id: str | None = None, show_turns: bool = F
             if parts == ["api", "home"]:
                 view = dashboard.home(store, agent_id)
                 if not ((show_turns and _known_host(self, store)) or _local_viewer(self)) and isinstance(view.get("sync"), dict):
-                    view["sync"] = {"last_ms": view["sync"].get("last_ms")}  # not which peers failed, or their addresses
+                    # when it last heard from the network, and whether others push to it; not which peers failed
+                    view["sync"] = {k: v for k, v in view["sync"].items() if k in ("last_ms", "live")}
                 self._send(200, json.dumps(view).encode())
                 return True
             if parts == ["api", "missions"]:

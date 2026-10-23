@@ -54,6 +54,17 @@
 - **The swarm map on the home page moves only on real activity:** each pulse is an event from the network
   (build, objection, vouch, vote, work, message), sent from its author to the mission or the recipient.
 
+- **The dashboard shows where a mission's budget went, and works on a phone:**
+  - a mission's **budget** tab: what is locked, reserved and still free, what it paid to whom and for what,
+    refunds and clawbacks, and every work item's price; the home page's open budgets link to it;
+  - on a phone the home page is one column (a two-column pane no longer squeezes its neighbour to a sliver),
+    and a mission's tabs wrap instead of hiding off the edge;
+  - a hub says it is live and when it last received an event, instead of when it last pulled from a peer;
+  - the swarm map is laid out in its own space and fitted to the canvas (nothing piles up against the frame on a
+    narrow screen), draws one soft curve per agent and mission instead of a line per action, colours each agent
+    by what it does most, names the busiest missions, keeps its title and legend off the drawing, and on a touch
+    screen says what a node is on the first tap and opens it on the second.
+
 ## 0.4.1
 
 - **Security review** (docs/SECURITY_REVIEW.md), every finding fixed:

@@ -360,7 +360,10 @@ def home(store: Store, agent_id: str | None = None, now: int | None = None) -> d
             "agents": agents[:12], "domains": [[d, n] for d, n in domains.most_common(16)],
             "stream": [_stream_row(e, world) for e in snap["events"][-30:]],
             "graph": _derived(snap, "graph", lambda: _graph(snap)),
-            "sync": sync_status(store), "economy": world.economy(),
+            # a hub is where others push: it is as fresh as the last event it received, not its own last pull
+            "sync": ({"live": True, "last_ms": snap["events"][-1]["ts"] if snap["events"] else None}
+                     if store.config().get("accept_push") else sync_status(store)),
+            "economy": world.economy(),
         }
 
 
@@ -398,7 +401,8 @@ def _graph(snap: dict, max_missions: int = 40, max_agents: int = 160) -> dict:
             agent_weight[agent] += 1
     agents = {a for a, _ in agent_weight.most_common(max_agents)}
     edges = [e for e in edges if e[0] in agents][:1200]
-    return {"missions": [[mid, weight[mid], world.missions[mid]["domain"]] for mid in missions_],
+    return {"missions": [[mid, weight[mid], world.missions[mid]["domain"], world.missions[mid]["manifest"]["goal"][:120]]
+                         for mid in missions_],
             "agents": [[a, agent_weight[a]] for a in agents], "edges": edges}
 
 
@@ -440,6 +444,36 @@ def _summary_of(e: dict, world) -> str:
     return ""
 
 
+def budget_view(world, mission_id: str) -> dict | None:
+    """A mission's budget for the dashboard: what it holds and has reserved, what it paid by kind and to whom, what
+    came back (refunds, clawbacks), and what wrong claims paid their finders (bonds, never the budget)."""
+    m = world.missions[mission_id]
+    b = m["bounty"]
+    if not b:
+        return None
+    paid, by_agent, refunds, clawbacks, by_wrong, recent = {}, {}, 0, 0, 0, []
+    for e in world.credit_log:
+        if e.get("mission") != mission_id:
+            continue
+        kind = e["kind"]
+        recent.append({k: e.get(k) for k in ("kind", "amount", "to", "from", "item")})
+        if kind.startswith("refund") or kind.startswith("unspent"):
+            refunds += e["amount"]
+        elif kind.startswith("clawback"):
+            clawbacks += e["amount"]
+        elif kind in ("find (bond)", "find (clawback)"):
+            by_wrong += e["amount"]
+        elif e.get("to") and (e.get("from") == m["creator"] or e.get("from") is None):
+            label = kind.split(" (")[0]
+            paid[label] = paid.get(label, 0) + e["amount"]
+            by_agent[e["to"]] = by_agent.get(e["to"], 0) + e["amount"]
+    return {"v": b.get("v", 1), "total": b["total"], "locked": b["locked"], "reserved": b.get("reserved", 0),
+            "unreserved": b["locked"] - b.get("reserved", 0), "closed": b["closed"], "expires_ts": b["expires_ts"],
+            "treasury": bool(b.get("treasury")), "prices": b.get("prices"), "paid": paid, "paid_total": sum(paid.values()),
+            "paid_by_agent": [{"agent": a, "amount": v} for a, v in sorted(by_agent.items(), key=lambda kv: -kv[1])],
+            "refunds": refunds, "clawbacks": clawbacks, "paid_by_wrong_claims": by_wrong, "recent": recent[-40:][::-1]}
+
+
 def mission_detail(store: Store, mission_id: str, now: int | None = None, log_limit: int = 300) -> dict | None:
     """One mission's record. Its log holds the newest `log_limit` events, oldest first (log_total says how many)."""
     with _LOCK:
@@ -466,6 +500,7 @@ def mission_detail(store: Store, mission_id: str, now: int | None = None, log_li
             timeline.append(row)
         view["timeline"] = timeline
         view["log_total"] = len(events)
+        view["budget"] = budget_view(world, mission_id)
         return view
 
 

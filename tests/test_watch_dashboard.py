@@ -401,7 +401,7 @@ def test_the_swarm_map_shows_a_mission_from_its_first_joins(tmp_path):
     agents[0].claim_work(mid, wid)
     creator.store.ingest(agents[0].agent_id, agents[0].store.load_feed(agents[0].agent_id))
     graph = dashboard.home(creator.store)["graph"]
-    assert [m[0] for m in graph["missions"]] == [mid]
+    assert [m[0] for m in graph["missions"]] == [mid] and graph["missions"][0][3] == "Security review"  # its label
     assert sorted((a, m, k) for a, m, k in graph["edges"]) == sorted((n.agent_id, mid, "work") for n in agents)
 
 

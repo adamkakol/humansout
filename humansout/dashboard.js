@@ -163,6 +163,7 @@ function poller(fn, ms) {
 function setStatus(text) { $("status").textContent = text; }
 function syncText(s, now) {
   if (!s) return "local copy";
+  if (s.live) return "live · last event " + (s.last_ms ? ago(s.last_ms, now) : "none yet");
   if (s.error) return "sync failed " + ago(s.last_ms, now);
   return "synced " + ago(s.last_ms, now);
 }
@@ -188,7 +189,7 @@ function homeView(view) {
       pane("hall of breaks", "finds", null),
       pane("threat ranking", "agents", null),
       pane("domains", "domains", el("a", { class: "more", href: "#/missions" }, "catalogue →")),
-      el("div", { style: "grid-column: span 2" }, pane("intercepted transmissions", "wire", el("a", { class: "more", href: "#/live" }, "live →"))),
+      el("div", { class: "span2" }, pane("intercepted transmissions", "wire", el("a", { class: "more", href: "#/live" }, "live →"))),
     ));
   const map = makeMap($("map-canvas"), $("map-tip"));
   const p = poller(async () => {
@@ -267,7 +268,7 @@ function renderHome(d) {
       el("span", {}, r.vouches + "/3 vouches"), r.attacks ? el("span", { class: "bright" }, r.attacks + " attacks") : null,
       el("span", {}, "closes " + ago(r.closes_at_ms, d.now)))), "every claim has its reviewers.");
   fill("juries", d.juries, (j) => juryItem(j, d.now), "no dispute is waiting for a jury.");
-  fill("bounties", d.bounties, (m) => missionItem(m, d.now, [m.bounty_value + " credits"].concat(m.bounty && m.bounty.treasury ? ["treasury"] : [])),
+  fill("bounties", d.bounties, (m) => missionItem(m, d.now, [m.bounty_value + " credits"].concat(m.bounty && m.bounty.treasury ? ["treasury"] : []), "budget"),
     "no open budget right now. credits come from the treasury's missions: attach an agent to earn some.");
   fill("finds", d.finds, (f) => el("a", { class: "item", href: mHref(f.mission, "claims") },
     el("div", { class: "goal" }, f.goal), el("div", { class: "meta" }, el("span", { class: "id" }, short(f.finder)), el("span", {}, "broke"),
@@ -291,8 +292,8 @@ function fill(id, rows, fn, empty) {
   if (!rows || !rows.length) { box.append(el("p", { class: "empty" }, empty)); return; }
   for (const r of rows) box.append(fn(r));
 }
-function missionItem(m, now, extra) {
-  return el("a", { class: "item", href: mHref(m.id) }, el("div", { class: "goal" }, m.goal),
+function missionItem(m, now, extra, tab) {
+  return el("a", { class: "item", href: mHref(m.id, tab) }, el("div", { class: "goal" }, m.goal),
     el("div", { class: "meta" }, el("span", { class: "id" }, short(m.id)), el("span", {}, m.domain), (extra || []).map((x) => el("span", {}, x)),
       el("span", {}, ago(m.last_activity, now))));
 }
@@ -315,7 +316,9 @@ function ticker(rows) {
     (e.summary ? " — " + e.summary.slice(0, 80) : ""))));
 }
 
-// the swarm map: missions as squares, agents as dots, edges by what they did; a small force layout on canvas
+// the swarm map: missions as squares, agents as dots in the colour of what they do most, one curve per agent and
+// mission. The force layout runs in its own space and is fitted to the canvas, so a phone's narrow map is filled
+// as well as a wide one, and nothing piles up against the frame
 function makeMap(canvas, tip) {
   const ctx = canvas.getContext("2d");
   const COLORS = { build: "rgba(228,255,240,", break: "rgba(255,59,59,", vouch: "rgba(57,255,136,", vote: "rgba(56,232,255,",
@@ -325,18 +328,41 @@ function makeMap(canvas, tip) {
   const KIND = { claim_done: "build", "artifact.publish": "build", challenge: "break", vouch: "vouch", vote: "vote",
                  dispute: "vote", ruling: "vote", join: "work", "work.claim": "work", "work.create": "work",
                  "work.release": "work", message: "message" };
-  let nodes = new Map(), edges = [], pulses = [], dead = false, w = 0, h = 0, dpr = 1, hover = null, frames = 0;
-  let seen = new Set(), queue = [], started = false;
+  const REST = 42, PAD = 22;
+  let nodes = new Map(), links = [], pulses = [], dead = false, w = 0, h = 0, dpr = 1, hover = null, frames = 0;
+  let seen = new Set(), queue = [], started = false, view = null, backdrop = null, pointer = "mouse", shape = "", running = false;
   const hue = (s) => { let x = 0; for (const c of s) x = (x * 31 + c.charCodeAt(0)) % 360; return x; };
+  const name = (goal) => {  // "Security review round 4 (20261022-1835), paid: find…" -> "Security review round 4, paid"
+    const t = (goal || "").split(":")[0].replace(/\s*\([^)]*\)/g, "").trim();
+    if (t.length <= 30) return t;
+    const words = t.split(/\s+/);  // too long: its first and last words, which tell missions of a series apart
+    let head = words[0], tail = "";
+    for (let i = 1; i < words.length && (head + " " + words[i]).length <= 16; i++) head += " " + words[i];
+    for (let i = words.length - 1; i > 0 && (words[i] + " " + tail).trim().length <= 12; i--) tail = (words[i] + " " + tail).trim();
+    return (head.length > 16 ? head.slice(0, 15) : head) + " … " + tail;
+  };
   const fit = () => {
     dpr = Math.min(window.devicePixelRatio || 1, 2);
     const r = canvas.getBoundingClientRect();
     w = r.width; h = r.height;
     canvas.width = Math.floor(w * dpr); canvas.height = Math.floor(h * dpr);
+    backdrop = null;
   };
   fit();
-  const onResize = () => fit();
-  addEventListener("resize", onResize);
+  const sizer = new ResizeObserver(() => fit());
+  sizer.observe(canvas);
+  function paintBackdrop() {  // a faint radar grid and a glow in the middle, drawn once per size
+    const c = document.createElement("canvas");
+    c.width = canvas.width; c.height = canvas.height;
+    const g = c.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const glow = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) * 0.6);
+    glow.addColorStop(0, "rgba(57,255,136,0.07)"); glow.addColorStop(1, "rgba(57,255,136,0)");
+    g.fillStyle = glow; g.fillRect(0, 0, w, h);
+    g.fillStyle = "rgba(57,255,136,0.10)";
+    for (let x = 12; x < w; x += 24) for (let y = 12; y < h; y += 24) g.fillRect(x, y, 1, 1);
+    backdrop = c;
+  }
   function activity(stream, serverNow) {
     const t = performance.now();
     const rows = (stream || []).filter((e) => !seen.has(e.id) && KIND[e.type]);
@@ -353,7 +379,7 @@ function makeMap(canvas, tip) {
     while (queue.length && queue[0].at <= t) {
       const { e } = queue.shift();
       const a = nodes.get(e.author), m = nodes.get(e.type === "message" ? e.to : e.mission);
-      if (!a || !m) continue;  // not on the map yet: the next refresh of the graph brings it
+      if (!a || !m || a === m) continue;  // not on the map yet: the next refresh of the graph brings it
       pulses.push({ a, m, k: KIND[e.type], t: 0 });
       a.flash = 1; m.flash = 1;
     }
@@ -361,119 +387,216 @@ function makeMap(canvas, tip) {
   function update(g, stream, serverNow) {
     if (!g) return;
     const next = new Map();
-    for (const [id, weight, domain] of g.missions) {
+    for (const [id, weight, domain, goal] of g.missions) {
       const old = nodes.get(id);
-      next.set(id, old ? Object.assign(old, { weight, domain }) : { id, kind: "mission", weight, domain,
-        x: w * (0.15 + 0.7 * Math.random()), y: h * (0.15 + 0.7 * Math.random()), vx: 0, vy: 0 });
+      next.set(id, old ? Object.assign(old, { weight, domain, goal }) : { id, kind: "mission", weight, domain, goal,
+        x: (Math.random() - 0.5) * 300, y: (Math.random() - 0.5) * 300, vx: 0, vy: 0, fresh: true });
     }
     for (const [id, weight] of g.agents) {
       const old = nodes.get(id);
-      next.set(id, old ? Object.assign(old, { weight }) : { id, kind: "agent", weight, x: w * Math.random(), y: h * Math.random(), vx: 0, vy: 0 });
+      next.set(id, old ? Object.assign(old, { weight }) : { id, kind: "agent", weight, x: 0, y: 0, vx: 0, vy: 0, fresh: true,
+        bend: hue(id) % 2 ? 1 : -1 });
+    }
+    // one link per agent and mission, as strong as how often they met, in the colour of what happened most
+    const pairs = new Map(), doing = new Map();
+    for (const [a, m, k] of g.edges) {
+      if (!next.has(a) || !next.has(m)) continue;
+      const key = a + " " + m;
+      const l = pairs.get(key) || { a: next.get(a), m: next.get(m), n: 0, kinds: {} };
+      l.n++; l.kinds[k] = (l.kinds[k] || 0) + 1;
+      pairs.set(key, l);
+      const d = doing.get(a) || {};
+      d[k] = (d[k] || 0) + 1;
+      doing.set(a, d);
+    }
+    const top = (counts) => Object.entries(counts).sort((x, y) => y[1] - x[1])[0][0];
+    links = [...pairs.values()];
+    for (const l of links) l.k = top(l.kinds);
+    for (const p of next.values()) {
+      if (p.kind === "agent") p.k = doing.has(p.id) ? top(doing.get(p.id)) : "work";
+      if (!p.fresh) continue;
+      const home = p.kind === "agent" && links.find((l) => l.a === p && !l.m.fresh);  // a newcomer starts by its mission
+      const at = home ? home.m : null;
+      p.x = (at ? at.x : (Math.random() - 0.5) * 200) + (Math.random() - 0.5) * 30;
+      p.y = (at ? at.y : (Math.random() - 0.5) * 200) + (Math.random() - 0.5) * 30;
+      p.fresh = false;
     }
     nodes = next;
-    edges = g.edges.filter(([a, m]) => nodes.has(a) && nodes.has(m)).map(([a, m, k]) => ({ a: nodes.get(a), m: nodes.get(m), k }));
-    frames = 0;
+    const now = nodes.size + ":" + links.length;
+    if (!shape) frames = 0;
+    else if (now !== shape) frames = Math.min(frames, 160);  // reheat only when it changed
+    while (frames < (still ? 421 : shape ? 0 : 300)) step();  // the first layout settles unseen; without motion, every one
+    shape = now;
     activity(stream, serverNow);
+    if (!running) loop();  // a still map that stopped drawing draws the new one
   }
   function step() {
     const list = [...nodes.values()];
-    const cool = frames < 300 ? 1 : 0.15;
+    const heat = frames < 360 ? 1 - frames / 450 : 0.2;
+    const aspect = Math.max(0.3, Math.min(4, (w - 2 * PAD) / Math.max(1, h - 2 * PAD)));
+    const gx = 0.03 * Math.min(1, aspect ** -2), gy = 0.03 * Math.min(1, aspect ** 2);  // the cloud takes the canvas's shape
     for (let i = 0; i < list.length; i++) {
       const p = list[i];
       for (let j = i + 1; j < list.length; j++) {
         const q = list[j];
         let dx = p.x - q.x, dy = p.y - q.y;
-        const d2 = dx * dx + dy * dy + 0.01;
-        if (d2 > 40000) continue;
-        const f = (p.kind === "mission" && q.kind === "mission" ? 900 : 160) / d2;
+        const d2 = dx * dx + dy * dy + 1;
+        if (d2 > 90000) continue;
+        const f = (p.kind === "mission" ? 1.6 : 1) * (q.kind === "mission" ? 1.6 : 1) * 400 / d2;
         dx *= f; dy *= f;
         p.vx += dx; p.vy += dy; q.vx -= dx; q.vy -= dy;
       }
     }
-    for (const e of edges) {
-      const dx = e.m.x - e.a.x, dy = e.m.y - e.a.y;
+    for (const l of links) {
+      const dx = l.m.x - l.a.x, dy = l.m.y - l.a.y;
       const d = Math.sqrt(dx * dx + dy * dy) || 1;
-      const f = (d - 46) * 0.0016;
-      e.a.vx += dx / d * f * 12; e.a.vy += dy / d * f * 12;
-      e.m.vx -= dx / d * f * 2; e.m.vy -= dy / d * f * 2;
+      const f = (d - REST) * 0.03 * Math.min(2, 1 + Math.log2(l.n) * 0.25);
+      l.a.vx += dx / d * f * 0.85; l.a.vy += dy / d * f * 0.85;
+      l.m.vx -= dx / d * f * 0.15; l.m.vy -= dy / d * f * 0.15;
     }
     for (const p of list) {
-      p.vx += (w / 2 - p.x) * 0.0009; p.vy += (h / 2 - p.y) * 0.0016;
-      p.x += Math.max(-6, Math.min(6, p.vx)) * cool; p.y += Math.max(-6, Math.min(6, p.vy)) * cool;
-      p.vx *= 0.55; p.vy *= 0.55;
-      p.x = Math.max(8, Math.min(w - 8, p.x)); p.y = Math.max(8, Math.min(h - 8, p.y));
+      p.vx -= p.x * gx; p.vy -= p.y * gy;
+      p.x += Math.max(-8, Math.min(8, p.vx)) * heat; p.y += Math.max(-8, Math.min(8, p.vy)) * heat;
+      p.vx *= 0.6; p.vy *= 0.6;
     }
     frames++;
   }
+  function place() {  // fit the layout to the canvas, easing so the map glides rather than jumps
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const p of nodes.values()) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
+    if (!isFinite(x0)) return;
+    const fx = (w - 2 * PAD) / Math.max(1, x1 - x0), fy = (h - 2 * PAD) / Math.max(1, y1 - y0), s = Math.min(2.4, fx, fy);
+    const goal = { sx: Math.min(fx, s * 1.25), sy: Math.min(fy, s * 1.25), cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
+    const ease = still || !view ? 1 : 0.08;
+    view = view || { ...goal };
+    for (const k of ["sx", "sy", "cx", "cy"]) view[k] += (goal[k] - view[k]) * ease;
+    for (const p of nodes.values()) { p.sx = w / 2 + (p.x - view.cx) * view.sx; p.sy = h / 2 + (p.y - view.cy) * view.sy; }
+  }
+  const control = (a, b, bend) => {  // a gentle arc, bowed to one side per agent, by at most 22 px
+    const dx = b.sx - a.sx, dy = b.sy - a.sy, k = Math.min(0.14, 22 / (Math.hypot(dx, dy) || 1)) * bend;
+    return [(a.sx + b.sx) / 2 - dy * k, (a.sy + b.sy) / 2 + dx * k];
+  };
+  const along = (a, b, c, t) => [(1 - t) * (1 - t) * a.sx + 2 * (1 - t) * t * c[0] + t * t * b.sx,
+                                (1 - t) * (1 - t) * a.sy + 2 * (1 - t) * t * c[1] + t * t * b.sy];
   function draw() {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
-    for (const e of edges) {
-      const lit = hover && (e.a === hover || e.m === hover);
-      ctx.strokeStyle = COLORS[e.k] + (lit ? "0.85)" : "0.13)");
-      ctx.lineWidth = lit ? 1.4 : 0.7;
-      ctx.beginPath(); ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.m.x, e.m.y); ctx.stroke();
+    if (!w || !h) return;
+    if (!backdrop) paintBackdrop();
+    ctx.drawImage(backdrop, 0, 0, w, h);
+    place();
+    ctx.globalCompositeOperation = "lighter";  // where links cross, they glow
+    for (const l of links) {
+      const lit = hover && (l.a === hover || l.m === hover);
+      const c = control(l.a, l.m, l.a.bend || 1);
+      ctx.strokeStyle = COLORS[l.k] + (lit ? "0.9)" : hover ? "0.06)" : "0.2)");
+      ctx.lineWidth = (lit ? 1.6 : 0.8) + Math.min(1.6, Math.log2(l.n) * 0.35);
+      ctx.beginPath(); ctx.moveTo(l.a.sx, l.a.sy); ctx.quadraticCurveTo(c[0], c[1], l.m.sx, l.m.sy); ctx.stroke();
     }
     if (!still) fire(); else queue = [];
     pulses = pulses.filter((p) => p.t < 1);
     for (const p of pulses) {
-      p.t += 0.02;
-      const x = p.a.x + (p.m.x - p.a.x) * p.t, y = p.a.y + (p.m.y - p.a.y) * p.t;
-      ctx.strokeStyle = COLORS[p.k] + (0.5 * (1 - p.t)).toFixed(2) + ")";
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(p.a.x, p.a.y); ctx.lineTo(x, y); ctx.stroke();
-      ctx.fillStyle = COLORS[p.k] + "0.95)";
-      ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
+      p.t += 0.018;
+      const c = control(p.a, p.m, p.a.bend || 1);
+      ctx.strokeStyle = COLORS[p.k] + (0.7 * (1 - p.t)).toFixed(2) + ")";
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      for (let i = 0; i <= 10; i++) {
+        const [x, y] = along(p.a, p.m, c, Math.max(0, p.t - 0.25) + Math.min(p.t, 0.25) * i / 10);
+        if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+      }
+      ctx.stroke();
+      const [x, y] = along(p.a, p.m, c, p.t);
+      ctx.fillStyle = COLORS[p.k] + "1)";
+      ctx.shadowColor = COLORS[p.k] + "1)"; ctx.shadowBlur = 10;
+      ctx.beginPath(); ctx.arc(x, y, 2.2, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
     }
+    ctx.globalCompositeOperation = "source-over";
     for (const p of nodes.values()) {  // who just acted glows for a moment
       if (!p.flash || p.flash < 0.03) continue;
       ctx.strokeStyle = "rgba(228,255,240," + (0.7 * p.flash).toFixed(2) + ")";
       ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.arc(p.x, p.y, 6 + 10 * (1 - p.flash), 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(p.sx, p.sy, 6 + 12 * (1 - p.flash), 0, Math.PI * 2); ctx.stroke();
       p.flash *= 0.95;
     }
     for (const p of nodes.values()) {
-      if (p.kind === "mission") {
-        const s = 5 + Math.min(14, Math.sqrt(p.weight) * 1.6);
-        ctx.fillStyle = "hsla(" + hue(p.domain || "") + ", 80%, 60%, " + (p === hover ? 0.95 : 0.55) + ")";
-        ctx.shadowColor = "rgba(57,255,136,0.6)"; ctx.shadowBlur = p === hover ? 18 : 8;
-        ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
-        ctx.shadowBlur = 0;
-        ctx.strokeStyle = "rgba(228,255,240,0.5)"; ctx.lineWidth = 1;
-        ctx.strokeRect(p.x - s / 2, p.y - s / 2, s, s);
-      } else {
-        const r = 1.4 + Math.min(4, Math.sqrt(p.weight) * 0.7);
-        ctx.fillStyle = p === hover ? "#e4fff0" : "rgba(169,201,180,0.85)";
-        ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
-      }
+      if (p.kind !== "agent") continue;
+      const r = 1.8 + Math.min(3.2, Math.sqrt(p.weight) * 0.55);
+      const c = COLORS[p.k || "work"];
+      ctx.fillStyle = p === hover ? "#ffffff" : c + "0.9)";
+      ctx.shadowColor = c + "0.9)"; ctx.shadowBlur = p === hover ? 14 : 6;
+      ctx.beginPath(); ctx.arc(p.sx, p.sy, r, 0, Math.PI * 2); ctx.fill();
+    }
+    const missions = [...nodes.values()].filter((p) => p.kind === "mission").sort((a, b) => b.weight - a.weight);
+    for (const p of missions) {
+      const s = 8 + Math.min(12, Math.sqrt(p.weight) * 1.3), hu = hue(p.domain || "");
+      ctx.shadowColor = "hsla(" + hu + ", 90%, 60%, 0.9)"; ctx.shadowBlur = p === hover ? 22 : 12;
+      ctx.fillStyle = "hsla(" + hu + ", 80%, 58%, " + (p === hover ? 0.95 : 0.7) + ")";
+      ctx.fillRect(p.sx - s / 2, p.sy - s / 2, s, s);
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = "rgba(228,255,240,0.75)"; ctx.lineWidth = 1;
+      ctx.strokeRect(p.sx - s / 2 + 0.5, p.sy - s / 2 + 0.5, s - 1, s - 1);
+      p.size = s;
+    }
+    // the busiest missions by name, as many as fit without overlapping
+    ctx.font = "10px " + getComputedStyle(canvas).fontFamily;
+    ctx.textBaseline = "top";
+    const taken = [];
+    for (const p of missions.slice(0, w < 520 ? 4 : 7)) {
+      const text = name(p.goal);
+      if (!text) continue;
+      const tw = ctx.measureText(text).width + 8, th = 15;
+      const x = Math.max(2, Math.min(w - tw - 2, p.sx - tw / 2)), y = Math.min(h - th - 2, p.sy + p.size / 2 + 4);
+      if (taken.some((b) => x < b[0] + b[2] && b[0] < x + tw && y < b[1] + b[3] && b[1] < y + th)) continue;
+      taken.push([x, y, tw, th]);
+      ctx.fillStyle = "rgba(2,5,3,0.78)"; ctx.fillRect(x, y, tw, th);
+      ctx.fillStyle = p === hover ? "#ffffff" : "rgba(228,255,240,0.85)";
+      ctx.fillText(text, x + 4, y + 3);
     }
   }
   function loop() {
+    running = !dead;
     if (dead) return;
     if (!document.hidden) { step(); draw(); }
-    if (still && frames > 320) { draw(); return; }  // reduced motion: a still map, no pulses
+    if (still && frames > 420) { draw(); running = false; return; }  // reduced motion: a still map, no pulses
     requestAnimationFrame(loop);
   }
-  canvas.addEventListener("mousemove", (ev) => {
+  function pick(ev, reach) {
     const r = canvas.getBoundingClientRect();
     const x = ev.clientX - r.left, y = ev.clientY - r.top;
-    let best = null, bd = 196;
+    let best = null, bd = reach * reach;
     for (const p of nodes.values()) {
-      const d = (p.x - x) ** 2 + (p.y - y) ** 2;
+      const d = (p.sx - x) ** 2 + (p.sy - y) ** 2;
       if (d < bd) { bd = d; best = p; }
     }
+    return { best, x, y };
+  }
+  function show(best, x, y, touch) {
     hover = best;
-    if (best) {
-      tip.style.display = "block";
-      tip.style.left = Math.min(x + 12, w - 200) + "px"; tip.style.top = (y + 12) + "px";
-      tip.textContent = best.kind === "mission" ? "mission " + short(best.id) + " · " + best.domain + " · " + best.weight + " actions"
-        : "agent " + short(best.id) + " · " + best.weight + " actions";
-    } else tip.style.display = "none";
+    if (!best) { tip.style.display = "none"; return; }
+    tip.style.display = "block";
+    tip.textContent = (best.kind === "mission" ? name(best.goal) + " · " + best.domain + " · " + best.weight + " actions"
+      : "agent " + short(best.id) + " · " + best.weight + " actions · mostly " + ({ vote: "judging", work: "working", build: "building",
+        break: "breaking", vouch: "vouching", message: "writing" })[best.k || "work"]) + (touch ? " · tap again to open" : "");
+    tip.style.left = Math.max(4, Math.min(x + 12, w - tip.offsetWidth - 4)) + "px";  // the tip is placed in the frame,
+    tip.style.top = canvas.offsetTop + (y + 16 + tip.offsetHeight > h ? y - tip.offsetHeight - 10 : y + 12) + "px";  // below the title
+  }
+  canvas.addEventListener("pointerdown", (ev) => { pointer = ev.pointerType || "mouse"; });
+  canvas.addEventListener("pointermove", (ev) => {
+    if ((ev.pointerType || "mouse") !== "mouse") return;
+    const { best, x, y } = pick(ev, 14);
+    show(best, x, y, false);
   });
-  canvas.addEventListener("mouseleave", () => { hover = null; tip.style.display = "none"; });
-  canvas.addEventListener("click", () => { if (hover) go(hover.kind === "mission" ? mHref(hover.id) : aHref(hover.id)); });
+  canvas.addEventListener("mouseleave", () => show(null));
+  canvas.addEventListener("click", (ev) => {
+    if (pointer === "mouse") { if (hover) go(hover.kind === "mission" ? mHref(hover.id) : aHref(hover.id)); return; }
+    const { best, x, y } = pick(ev, 26);  // a finger: the first tap says what it is, the second opens it
+    if (best && best === hover) go(best.kind === "mission" ? mHref(best.id) : aHref(best.id));
+    else show(best, x, y, true);
+  });
   loop();
-  return { update, stop: () => { dead = true; removeEventListener("resize", onResize); } };
+  return { update, stop: () => { dead = true; sizer.disconnect(); } };
 }
 
 // ---- the catalogue: thousands of missions -----------------------------------------------------------
@@ -580,9 +703,9 @@ function missionsView(view, route) {
 // ---- one mission ------------------------------------------------------------------------------------
 function missionView(view, route) {
   let logLimit = 300;
-  const tabs = ["overview", "claims", "work", "log", "files"];
   async function load() {
     const m = await getJSON("api/mission/" + route.id + "?log=" + logLimit);
+    const tabs = ["overview", "claims", "work"].concat(m.budget ? ["budget"] : [], ["log", "files"]);
     const now = Date.now();
     const man = m.manifest;
     const pending = m.claims.filter((c) => c.status === "pending").length;
@@ -602,7 +725,7 @@ function missionView(view, route) {
       el("nav", { class: "tabs", "aria-label": "Mission" }, tabs.map((t) => el("a", { href: mHref(m.mission_id, t), "aria-current": t === tab ? "page" : null },
         t + (t === "claims" ? " · " + m.claims.length : t === "work" && m.work.length ? " · " + m.work.length : t === "files" ? " · " + m.artifacts.length : "")))),
       body);
-    ({ overview: overviewTab, claims: claimsTab, work: workTab, log: logTab, files: filesTab })[tab](body, m, now);
+    ({ overview: overviewTab, claims: claimsTab, work: workTab, budget: budgetTab, log: logTab, files: filesTab })[tab](body, m, now);
   }
   function budgetText(b) {
     if (b.v !== 2) return b.build + " credits for the result, " + b.find + " per find (" + b.finds_left + " left)";
@@ -614,6 +737,31 @@ function missionView(view, route) {
     if (p.jury) paid.push(p.jury + " per juror");
     return b.locked + " of " + b.total + " credits left, " + (b.reserved || 0) + " reserved" + (b.treasury ? " (treasury)" : "") +
       ": " + paid.join(", ") + (p.find ? " · a wrong claim pays its finder up to " + p.find : "");
+  }
+  function budgetTab(box, m, now) {
+    const b = m.budget;
+    const stats = el("div", { class: "stats" });
+    for (const [k, v, sub] of [["budget", b.total, b.treasury ? "treasury" : ""], ["still in it", b.locked, ""],
+      ["reserved", b.reserved, "for funded work"], ["free", b.unreserved, ""], ["paid out", b.paid_total, ""],
+      ["came back", b.refunds + b.clawbacks, b.clawbacks ? b.clawbacks + " clawed back" : ""]]) {
+      stats.append(el("div", { class: "stat" }, el("div", { class: "k" }, k), el("div", { class: "v" }, num(v || 0), sub ? el("small", {}, " " + sub) : null)));
+    }
+    const facts = el("dl", {},
+      el("dt", {}, "prices"), el("dd", {}, budgetText(m.bounty)),
+      el("dt", {}, "state"), el("dd", {}, b.closed ? "closed: " + b.closed : "open · expires " + ago(b.expires_ts, now)),
+      el("dt", {}, "paid by kind"), el("dd", {}, Object.keys(b.paid).length ? Object.entries(b.paid).map(([k, v]) => k + " " + v).join(" · ") : "nothing yet"),
+      el("dt", {}, "finds"), el("dd", {}, b.paid_by_wrong_claims ? b.paid_by_wrong_claims + " paid by wrong claims' bonds (never by the budget)" : "none paid yet"));
+    const items = m.work.length ? el("table", {}, el("thead", {}, el("tr", {}, ["item", "pays", "status"].map((h) => el("th", {}, h)))),
+      el("tbody", {}, m.work.map((w) => el("tr", {}, el("td", {}, el("span", { class: "goal" }, w.title)),
+        el("td", { class: "n" }, w.funded ? w.price + " cr" : (w.price ? w.price + " cr · paid" : "–")), el("td", {}, tag(w.status)))))) : el("p", { class: "empty" }, "not split into work items.");
+    const agents = b.paid_by_agent.length ? el("table", {}, el("tbody", {}, b.paid_by_agent.map((a) =>
+      el("tr", {}, el("td", {}, agentLink(a.agent)), el("td", { class: "n" }, a.amount + " cr"))))) : el("p", { class: "empty" }, "nobody paid yet: credits are paid when work is accepted, then held until it can no longer be refuted.");
+    box.append(stats, el("div", { class: "grid3" },
+      el("section", { class: "pane span2" }, el("h2", {}, "budget"), el("div", { class: "body" }, facts)),
+      el("section", { class: "pane" }, el("h2", {}, "paid to"), el("div", { class: "body" }, agents)),
+      el("section", { class: "pane span2" }, el("h2", {}, "work items · prices"), el("div", { class: "body scroll" }, items)),
+      el("section", { class: "pane" }, el("h2", {}, "movements"), el("div", { class: "body" }, b.recent.length ? el("table", {}, el("tbody", {},
+        b.recent.slice(0, 20).map((r) => el("tr", {}, el("td", {}, r.kind), el("td", { class: "n" }, r.amount + " cr"), el("td", {}, r.to ? agentLink(r.to) : "–"))))) : el("p", { class: "empty" }, "none yet")))));
   }
   function overviewTab(box, m, now) {
     const man = m.manifest, rules = m.rules || {};
@@ -631,7 +779,7 @@ function missionView(view, route) {
     }
     if ((m.builders || []).length) facts.append(el("dt", {}, "building"), el("dd", {}, el("div", { class: "row" }, m.builders.map((b) => el("span", {}, agentLink(b.agent), " until " + clock(b.until_ms))))));
     facts.append(el("dt", {}, "agents"), el("dd", {}, el("div", { class: "row" }, m.participants.slice(0, 60).map((p) => agentLink(p.agent)), m.participants.length > 60 ? "+" + (m.participants.length - 60) : null)));
-    box.append(el("div", { class: "grid3" }, el("section", { class: "pane", style: "grid-column: span 2" }, el("h2", {}, "dossier"), el("div", { class: "body" }, facts)),
+    box.append(el("div", { class: "grid3" }, el("section", { class: "pane span2" }, el("h2", {}, "dossier"), el("div", { class: "body" }, facts)),
       el("section", { class: "pane" }, el("h2", {}, "latest"), el("div", { class: "body" }, streamLog(m.timeline.slice(-14).reverse().map((e) => ({ ...e, mission: null })), now)))));
   }
   function claimsTab(box, m, now) {
@@ -717,7 +865,7 @@ function agentView(view, route) {
           el("tbody", {}, Object.entries(r.fields).map(([dom, f]) => el("tr", {}, el("td", {}, el("a", { href: "#/missions?domain=" + encodeURIComponent(dom) }, dom)),
             [f.points, f.built, f.found, f.vouched || 0, f.judged || 0].map((v) => el("td", { class: "n" }, v))))))),
           el("div", { class: "body" }, el("div", { class: "muted" }, "badge for a README:"), el("code", {}, "![HumansOut record](" + location.origin + "/badge/" + r.agent + ".svg)"))),
-        el("section", { class: "pane", style: "grid-column: span 2" }, el("h2", {}, "signed work · " + num(r.work_total)), el("div", { class: "body" },
+        el("section", { class: "pane span2" }, el("h2", {}, "signed work · " + num(r.work_total)), el("div", { class: "body" },
           el("div", { class: "log" }, r.work.slice().reverse().map((w) => el("div", { class: "line" },
             el("span", { class: "muted", title: new Date(w.ts).toLocaleString() }, clock(w.ts)),
             el("span", { class: "kind k-" + (w.kind === "claim" ? "claim_done" : w.kind) }, w.mode === "counterexample" ? "break" : w.kind),

@@ -186,6 +186,9 @@ def test_a_public_dashboard_does_not_show_when_its_owner_works_or_its_local_netw
     assert public["peers"] == ["https://hub.example.org"]
     assert json.loads(get(f"{url}/api/home", tunnelled)[1])["sync"] == {"last_ms": 1}
     assert json.loads(get(f"{url}/peers")[1]) == ["https://hub.example.org"]
+    node.store.set_config("accept_push", True)  # a hub is as fresh as what is pushed to it: it says so, and no more
+    sync = json.loads(get(f"{url}/api/home", tunnelled)[1])["sync"]
+    assert sync["live"] is True and set(sync) == {"live", "last_ms"}
 
 
 def test_blob_ranges_are_read_from_the_file_and_checked(hub):
