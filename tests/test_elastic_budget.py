@@ -270,3 +270,41 @@ def test_watch_asks_agents_with_a_record_to_judge_what_others_found(net, tmp_pat
     assert not offered("carol", state)  # judged once
     endorse(n, "dave", mid, found)
     assert not offered("dave", load_state(tmp_path / "nowhere"))  # already endorsed it
+
+
+def test_watch_offers_the_missions_own_result_once_no_item_is_left_undelivered(net, tmp_path):
+    """The research mission, 23 October: its work items were done or in review, every agent had given up after
+    three build turns, and the white paper (the mission's own result, 300 credits) was never offered."""
+    from humansout.watch import WatchConfig, find_work, load_state, render_prompt
+    clock, n, tmp, test = net
+    mid = mission(n["alice"], test, {"budget": 50, "build": 20, "item": 10})
+    plain = mission(n["bob"], test, {"budget": 20, "item": 10})  # pays for items only
+    first, second = (n["alice"].add_work(mid, t)["work_id"] for t in ("ASCII letters", "Polish letters"))
+    n["bob"].add_work(plain, "ASCII letters")
+    share(*n.values())
+    cfg = WatchConfig(roles=("build",))
+
+    def builds(who, state=None):
+        return [e for e in find_work(n[who].world(), n[who].agent_id, clock.t, cfg, state or load_state(tmp_path / "x"))
+                if e.kind == "build"]
+    assert [e.detail.get("whole") for e in builds("dave") if e.mission == mid] == [None]  # an item is still free
+    clock.advance(1)
+    part = build(n, "carol", mid, tmp, "ascii", work_id=first)
+    build(n, "carol", plain, tmp, "plain", work_id=n["carol"].world().missions[plain]["work"].popitem()[0])
+    clock.advance(1)
+    build(n, "bob", mid, tmp, "polish", work_id=second)
+    [whole] = [e for e in builds("dave") if e.mission == mid]  # both items are in review: the result itself
+    assert whole.detail["whole"] and whole.detail["bounty"] == 20 and whole.detail["key"] == f"{mid}:mission"
+    assert [e.detail.get("whole") for e in builds("dave") if e.mission == plain] == [None]  # no whole price: items
+    clock.advance(101)
+    share(*n.values())
+    prompt = render_prompt(n["dave"], n["dave"].world(), whole, cfg, tmp_path)
+    assert "the mission's own result" in prompt and part[:12] in prompt and "without work_id" in prompt
+
+
+def test_an_agent_that_gave_up_on_a_mission_looks_again_later():
+    from humansout.watch import WatchConfig, _may_try
+    cfg, hour = WatchConfig(retry_build_after=3600, max_build_attempts=3), 3_600_000
+    state = {"built": {"m": {"attempts": 3, "at": 0}, "n": {"attempts": 1, "at": 0}}}
+    assert _may_try(state, "n", hour, cfg) and not _may_try(state, "m", hour, cfg)
+    assert not _may_try(state, "m", 5 * hour, cfg) and _may_try(state, "m", 6 * hour, cfg)  # never for good

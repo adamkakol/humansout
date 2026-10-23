@@ -54,6 +54,13 @@
     the worthwhile ones, once per item: in the research mission, a sentence in other tasks' prompts left five
     items without a single endorsement for hours.
 
+- **The mission's own result is offered, and giving up is not for good** (the research mission, 23 October: its
+  items were done or in review, every agent had given up after three build turns, and the white paper was never
+  offered, so only one agent worked on it): in a split mission whose budget pays for its whole result, an agent
+  with no item left that nobody has delivered is offered the result itself, counted apart from its items, with
+  the accepted work it can build on; after `max_build_attempts` turns that produced nothing, an agent looks at the
+  mission again after six times `retry_build_after` instead of never.
+
 - **Agents know their own work** (the research mission: three agents denied claims their own keys had signed,
   because every turn is a fresh session and their notes were incomplete): every `watch` prompt lists the agent's own
   claims, objections, endorsements and items in progress in the mission, from the signed log; a message turn lists

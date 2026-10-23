@@ -298,9 +298,12 @@ def in_active_hours(hours: tuple[int, int] | None, local_hour: int) -> bool:
 
 
 def _may_try(state: dict, key: str, now: int, cfg: WatchConfig) -> bool:
-    """Not given up on (max_build_attempts), and not tried within retry_build_after: a mission, or one work item."""
+    """Not tried within retry_build_after: a mission, or one work item. After max_build_attempts that produced
+    nothing, six times as long: a mission that runs for days changes (new items, accepted work to build on), so
+    giving up is never for good (the research mission, 23 October: every agent had given up by the evening)."""
     tried = state["built"].get(key, {"attempts": 0, "at": 0})
-    return tried["attempts"] < cfg.max_build_attempts and now - tried["at"] >= cfg.retry_build_after * 1000
+    wait = cfg.retry_build_after * (6 if tried["attempts"] >= cfg.max_build_attempts else 1)
+    return now - tried["at"] >= wait * 1000
 
 
 def _spread(me: str, key: str) -> str:
@@ -416,7 +419,19 @@ def find_work(world, me: str, now: int, cfg: WatchConfig, state: dict, node_mess
                         and (not exclusive or not w["claimed_by"] or w["claimed_by"] == me or w["lease_until"] <= now)]
                 # an item this agent tried and could not deliver waits (retry_build_after), the others do not
                 left = [w for w in left if _may_try(state, f"{mid}:{w['id']}", now, cfg)]
-                if not left or any(c["target"] == "mission" and (not c["settled"] or c["status"] == "accepted") for c in mine):
+                if any(c["target"] == "mission" and (not c["settled"] or c["status"] == "accepted") for c in mine):
+                    continue
+                in_review = {world.items[i]["target"] for i in m["claims"] if not world.items[i]["settled"]}
+                whole_pays = bounty_value(m, "build")
+                if not left or (whole_pays and all(w["id"] in in_review for w in left)):
+                    # no item left that nobody has delivered yet: the mission's own result, when its budget pays for
+                    # it (the research mission: the white paper was never offered, so only one agent worked on it)
+                    pays = whole_pays
+                    if pays and _may_try(state, f"{mid}:mission", now, cfg) and pays >= cfg.min_bounty:
+                        odds = (len(_strong_claims(world, m, "mission", me)), 0)
+                        build.append(Event("build", mid, None, {"bounty": pays, "odds": odds, "whole": True,
+                                                                "key": f"{mid}:mission",
+                                                                "expected": expected_credits(world, m, me, pays, odds)}))
                     continue
                 paid = [w for w in left if w.get("reserve")]
                 own = [w for w in left if any(a == me for a, _ in _live_workers(w, now))]
@@ -544,6 +559,21 @@ def _work_picture(world, m: dict, me: str, now: int, suggested: str | None, cli:
             + (f"\nSuggested for you, as the least crowded: {suggested}." if suggested else ""))
 
 
+def _whole_picture(world, m: dict, me: str, now: int) -> str:
+    """The mission's own result in a split mission: what its parts already are, and who else claims the whole."""
+    accepted = [world.items[i] for i in m["claims"] if world.items[i]["status"] == "accepted"
+                and world.items[i]["target"] != "mission"]
+    parts = [f"{c['id'][:12]} on item {c['target']} ({(m['work'].get(c['target']) or {}).get('title', '')[:60]}) by "
+             f"agent {c['author'][:8]}" for c in accepted[:30]]
+    others = [_claim_line(world, m, world.items[i], now) for i in m["claims"] if world.items[i]["target"] == "mission"
+              and world.items[i]["author"] != me and not world.items[i]["settled"]]
+    return (f"This turn is about the mission's own result, what its success criteria ask for: its work items are parts "
+            f"of it. Accepted work on its items ({len(accepted)}): {'; '.join(parts) or 'none yet'}"
+            + (f"; and {len(accepted) - 30} more" if len(accepted) > 30 else "")
+            + f". Claims on the whole mission by others: {'; '.join(others) or 'none'}. A claim on the whole mission "
+              f"has no work id (claim_done or submit without work_id).")
+
+
 def _mission_picture(world, m: dict, me: str, now: int) -> str:
     building = [f"{_who(world, m, a)} until {_for(u - now)} from now" for a, u in sorted(m["builders"].items())
                 if u > now and a != me]
@@ -648,7 +678,9 @@ def render_prompt(node, world, ev: Event, cfg: WatchConfig, workdir: Path) -> st
     if ev.kind == "review":
         task += " " + _review_picture(world, m, world.items.get(ev.item), node.agent_id, node.clock()) + " " + \
             SPLIT_OFF.format(cli=cli, mission=ev.mission)
-    if ev.kind == "build" and m["work"] and not swarm_rule(m, "exclusive_items"):
+    if ev.kind == "build" and ev.detail.get("whole"):
+        task += " " + _whole_picture(world, m, node.agent_id, node.clock())
+    elif ev.kind == "build" and m["work"] and not swarm_rule(m, "exclusive_items"):
         task += " " + _work_picture(world, m, node.agent_id, node.clock(), ev.detail.get("suggested"), cli) + " " + \
             SPLIT_OFF.format(cli=cli, mission=ev.mission)
     elif ev.kind == "build":
@@ -884,8 +916,9 @@ def cycle(node, cfg: WatchConfig, turns_per_cycle: int = 1) -> dict:
         elif ev.kind == "endorse":
             state["endorse_seen"].extend(ev.detail["items"])
         else:
-            tried = state["built"].get(ev.mission, {"attempts": 0, "at": 0})
-            state["built"][ev.mission] = {"attempts": tried["attempts"] + 1, "at": now}
+            key = ev.detail.get("key", ev.mission)  # the whole result of a split mission counts apart from its items
+            tried = state["built"].get(key, {"attempts": 0, "at": 0})
+            state["built"][key] = {"attempts": tried["attempts"] + 1, "at": now}
         state["turn_times"].append(now)
         save_state(node.home, state)  # mark first: a crash mid-turn must not loop on the same event
         claims_before = _claims_by(world, ev.mission, node.agent_id)
@@ -925,7 +958,7 @@ def _note_build(node, state: dict, ev: Event, own_before: int, claims_before: in
     cfg = cfg or WatchConfig()
     world = node.world()
     if _claims_by(world, ev.mission, node.agent_id) > claims_before:
-        state["built"][ev.mission] = {"attempts": 0, "at": 0}
+        state["built"][ev.detail.get("key", ev.mission)] = {"attempts": 0, "at": 0}
     m = world.missions.get(ev.mission) or {}
     new = node.store.load_feed(node.agent_id)[own_before:]
     took = {e["body"].get("work_id") for e in new if e["type"] == "work.claim"} & set(m.get("work", {}))
