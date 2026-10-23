@@ -441,6 +441,11 @@ def _summary_of(e: dict, world) -> str:
         return ((b.get("evidence") or {}).get("text") or "")[:600]
     if t == "ruling":
         return f"{b.get('decision', '')}: {b.get('reason', '')}"[:600]
+    if t == "work.endorse":
+        return f"endorses work item {str(b.get('work_id', ''))[:8]}: " + ((b.get("evidence") or {}).get("text") or "")[:500]
+    if t == "budget.add":
+        return (f"added {b.get('amount', 0)} credits to the budget" + (f", open {b['open']}%" if b.get("open") else "")
+                + (", extended" if b.get("extend") else ""))
     return ""
 
 

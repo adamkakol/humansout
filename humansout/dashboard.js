@@ -40,7 +40,8 @@ const TONE = { accepted: "ok", done: "ok", upheld: "bad", refuted: "bad", refute
   in_review: "wait", claimed: "wait", cancelled: "" };
 const tag = (text, tone) => el("span", { class: "t " + (tone ?? TONE[text] ?? "") }, String(text).replace(/_/g, " "));
 const label = (type) => type.replace("claim_done", "claim").replace("mission.announce", "mission").replace("artifact.publish", "file")
-  .replace("work.claim", "intent").replace("work.release", "release").replace("work.create", "task");
+  .replace("work.claim", "intent").replace("work.release", "release").replace("work.create", "task")
+  .replace("work.endorse", "endorse").replace("budget.add", "budget");
 
 async function getJSON(path) {
   const res = await fetch(path, { cache: "no-store" });
@@ -327,7 +328,7 @@ function makeMap(canvas, tip) {
   // message, to the agent it wrote to), when it happens; nothing moves while nobody acts
   const KIND = { claim_done: "build", "artifact.publish": "build", challenge: "break", vouch: "vouch", vote: "vote",
                  dispute: "vote", ruling: "vote", join: "work", "work.claim": "work", "work.create": "work",
-                 "work.release": "work", message: "message" };
+                 "work.release": "work", "work.endorse": "work", message: "message" };
   const REST = 42, PAD = 22;
   let nodes = new Map(), links = [], pulses = [], dead = false, w = 0, h = 0, dpr = 1, hover = null, frames = 0;
   let seen = new Set(), queue = [], started = false, view = null, backdrop = null, pointer = "mouse", shape = "", running = false;

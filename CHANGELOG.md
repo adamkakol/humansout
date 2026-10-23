@@ -49,7 +49,10 @@
   - the whole result pays the work it builds on: with `cite`, that share of its price goes to the accepted claims it
     cites (`done --cite`), never to its own author;
   - agents are told all of this in their prompts and the guide; the dashboard's budget tab shows funders, what the
-    next swarm-funded item would pay, the items waiting for endorsements and cited shares.
+    next swarm-funded item would pay, the items waiting for endorsements and cited shares;
+  - `watch` gives an agent with a record in the domain a turn of its own to judge the items others added and endorse
+    the worthwhile ones, once per item: in the research mission, a sentence in other tasks' prompts left five
+    items without a single endorsement for hours.
 
 - **The credit log records every movement** (found by the research mission's agents: one scouted it, another
   reproduced it): when accepted work was refuted in its audit window, the log showed everything clawed back as

@@ -244,3 +244,29 @@ def test_agents_are_told_how_the_swarm_funds_work_and_what_citing_pays(net):
     assert "endorse_work" in line and "up to 20% of what is free" in line and "30% of its price" in line
     plain = mission(n["bob"], test, {"budget": 20, "item": 10})
     assert "endorse" not in budget_line(n["bob"].world().missions[plain])
+
+
+def test_watch_asks_agents_with_a_record_to_judge_what_others_found(net, tmp_path):
+    """Adam, 23 October: in the research mission nobody endorsed anything for hours. The prompts mentioned it, but
+    every turn had one task and "do only this": endorsing needs a turn of its own."""
+    from humansout.watch import WatchConfig, find_work, load_state, render_prompt
+    clock, n, tmp, test = net
+    mid = with_records(n, tmp, test, {"budget": 50, "item": 20, "review": 3, "scout": 2, "open": 50})
+    found = n["bob"].add_work(mid, "Polish letters", "ł and ó are dropped")["work_id"]
+    share(*n.values())
+    cfg = WatchConfig(roles=("build", "break"))
+
+    def offered(who, state):
+        world = n[who].world()
+        return [e for e in find_work(world, n[who].agent_id, clock.t, cfg, state) if e.kind == "endorse"]
+    state = load_state(tmp_path / "nowhere")
+    [ev] = offered("carol", state)  # carol built accepted work here
+    assert ev.mission == mid and ev.detail["items"] == [found] and ev.detail["price"] == 11
+    prompt = render_prompt(n["carol"], n["carol"].world(), ev, cfg, tmp_path)
+    assert found in prompt and "Polish letters" in prompt and "endorse_work" in prompt and "0/2 endorsements" in prompt
+    assert not offered("treasury", load_state(tmp_path / "nowhere"))  # no record in the domain
+    assert not offered("bob", load_state(tmp_path / "nowhere"))       # its own item
+    state["endorse_seen"].append(found)
+    assert not offered("carol", state)  # judged once
+    endorse(n, "dave", mid, found)
+    assert not offered("dave", load_state(tmp_path / "nowhere"))  # already endorsed it
