@@ -17,7 +17,7 @@ from importlib import resources
 from pathlib import Path
 
 from .core import canonical, sha256_hex
-from .state import build_world
+from .state import build_world, swarm_rule
 from .store import Store
 from .verify import LABELS
 
@@ -457,6 +457,8 @@ def budget_view(world, mission_id: str) -> dict | None:
             continue
         kind = e["kind"]
         recent.append({k: e.get(k) for k in ("kind", "amount", "to", "from", "item")})
+        if kind.startswith("budget ("):  # co-funding in, and co-funders' shares of a refund out: neither is pay
+            continue
         if kind.startswith("refund") or kind.startswith("unspent"):
             refunds += e["amount"]
         elif kind.startswith("clawback"):
@@ -468,11 +470,22 @@ def budget_view(world, mission_id: str) -> dict | None:
             label = kind.split(" (")[0]
             paid[label] = paid.get(label, 0) + e["amount"]
             by_agent[e["to"]] = by_agent.get(e["to"], 0) + e["amount"]
+    nxt = world._pool_prices(m) if b.get("v") == 2 and b.get("open") and not b["closed"] else None
     return {"v": b.get("v", 1), "total": b["total"], "locked": b["locked"], "reserved": b.get("reserved", 0),
             "unreserved": b["locked"] - b.get("reserved", 0), "closed": b["closed"], "expires_ts": b["expires_ts"],
             "treasury": bool(b.get("treasury")), "prices": b.get("prices"), "paid": paid, "paid_total": sum(paid.values()),
             "paid_by_agent": [{"agent": a, "amount": v} for a, v in sorted(by_agent.items(), key=lambda kv: -kv[1])],
-            "refunds": refunds, "clawbacks": clawbacks, "paid_by_wrong_claims": by_wrong, "recent": recent[-40:][::-1]}
+            "refunds": refunds, "clawbacks": clawbacks, "paid_by_wrong_claims": by_wrong, "recent": recent[-40:][::-1],
+            # elastic budgets: who funded it, how much of the free part one swarm-funded item may take and what the
+            # next would get now, the items waiting for endorsements, and the share the whole result gives cited work
+            "funders": [{"agent": a, "amount": v} for a, v in sorted((b.get("funders") or {m["creator"]: b["total"]}).items(),
+                                                                     key=lambda kv: -kv[1])],
+            "open": b.get("open", 0), "cite": b.get("cite", 0),
+            "next_item": dict(zip(("price", "review", "scout"), nxt, strict=True)) if nxt else None,
+            "endorsements_needed": swarm_rule(m, "endorsements"),
+            "waiting": [{"work": w["id"], "title": w["title"], "endorsements": len(w["endorsements"])}
+                        for w in m["work"].values() if not w["reserve"] and not w["done_claim"] and not w["cancelled"]
+                        and w["created_by"] != m["creator"]]}
 
 
 def mission_detail(store: Store, mission_id: str, now: int | None = None, log_limit: int = 300) -> dict | None:

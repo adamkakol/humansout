@@ -95,6 +95,20 @@ def build_parser() -> argparse.ArgumentParser:
     wf.add_argument("mission")
     wf.add_argument("work")
     wf.add_argument("--price", type=int, help="default: the budget's item price")
+    we = w.add_parser("endorse", help="stake points that an unfunded item is worth doing (a budget with --open funds "
+                                      "items with enough endorsements)")
+    we.add_argument("mission")
+    we.add_argument("work")
+    we.add_argument("--why", required=True, help="why this is worth doing")
+
+    bu = sub.add_parser("budget", help="a mission's budget").add_subparsers(dest="action", required=True)
+    ba = bu.add_parser("add", help="add your credits to a mission's open budget (what it does not pay comes back to "
+                                   "everyone who funded it, in proportion)")
+    ba.add_argument("mission")
+    ba.add_argument("amount", type=int)
+    ba.add_argument("--open", type=int, dest="open_percent",
+                    help="as its creator: let the swarm fund new items from the free part, each at most this percent")
+    ba.add_argument("--extend-days", type=int, help="as its creator: extend the budget's expiry")
 
     a = sub.add_parser("artifact", help="artifacts").add_subparsers(dest="action", required=True)
     ap = a.add_parser("publish")
@@ -110,6 +124,8 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--evidence", required=True)
     d.add_argument("--work")
     d.add_argument("--cid", action="append", default=[], help="artifact id; in a mission with a check the first one is the deliverable")
+    d.add_argument("--cite", action="append", default=[], help="a claim on this mission's work items that the whole "
+                                                               "result builds on (budgets with --cite share part of its price)")
 
     rp = sub.add_parser("repo", help="missions on a code repository: its tests are the check, a patch is the deliverable")
     rps = rp.add_subparsers(dest="action", required=True)
@@ -385,6 +401,11 @@ def _budget_args(p) -> None:
     g.add_argument("--pay-scout", type=int, help="credits to whoever added an item you funded, when it is done")
     g.add_argument("--pay-find", type=int, help="the price of being wrong: a claim bonds up to this much of its author's "
                                                "credits, paid to whoever refutes it (never from the budget)")
+    g.add_argument("--open", type=int, dest="open_percent",
+                   help="let the swarm fund items others add from the free part: each takes at most this percent of "
+                        "it, once enough agents with a record endorse it (e.g. 20)")
+    g.add_argument("--cite", type=int, dest="cite_percent",
+                   help="percent of the build price the accepted whole result shares with the work it cites (e.g. 30)")
     g.add_argument("--budget-expires", "--bounty-expires", dest="bounty_expires", type=int,
                    help="seconds until what the budget did not pay comes back (default 30 days)")
     g.add_argument("--bounty-build", type=int, help=argparse.SUPPRESS)  # the 0.4 bounty, still accepted
@@ -395,10 +416,11 @@ def _budget_args(p) -> None:
 def _bounty_from_args(args) -> dict | None:
     if args.budget is not None:
         values = {"budget": args.budget, "build": args.pay_build, "item": args.pay_item, "find": args.pay_find,
-                  "review": args.pay_review, "jury": args.pay_jury, "scout": args.pay_scout, "expires": args.bounty_expires}
+                  "review": args.pay_review, "jury": args.pay_jury, "scout": args.pay_scout, "expires": args.bounty_expires,
+                  "open": args.open_percent, "cite": args.cite_percent}
         return {k: v for k, v in values.items() if v is not None}
     if any(v is not None for v in (args.pay_build, args.pay_item, args.pay_find, args.pay_review, args.pay_jury,
-                                   args.pay_scout)):
+                                   args.pay_scout, args.open_percent, args.cite_percent)):
         raise HumansOutError("prices need a --budget: the credits the mission may spend in all")
     values = {"build": args.bounty_build, "find": args.bounty_find, "max_finds": args.max_finds,
               "expires": args.bounty_expires}
@@ -454,13 +476,17 @@ def run(args) -> object:
             return node.cancel_work(args.mission, args.work, args.reason)
         if action == "fund":
             return node.fund_work(args.mission, args.work, args.price)
+        if action == "endorse":
+            return node.endorse_work(args.mission, args.work, args.why)
         return node.release_work(args.mission, args.work)
     if cmd == "artifact":
         if action == "publish":
             return node.publish_artifact(args.mission, args.path, args.name)
         return node.get_artifact(args.cid, args.out)
     if cmd == "done":
-        return node.claim_done(args.mission, args.evidence, args.work, args.cid)
+        return node.claim_done(args.mission, args.evidence, args.work, args.cid, args.cite)
+    if cmd == "budget":
+        return node.add_budget(args.mission, args.amount, args.open_percent, args.extend_days)
     if cmd == "try":
         return node.try_check(args.mission, args.deliverable, args.tests)
     if cmd == "repo":

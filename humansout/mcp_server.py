@@ -19,7 +19,7 @@ from .node import Node
 
 # tools whose events coordinate the swarm: pushed to the hubs as soon as they are written
 PUBLISHED = {"join_mission", "claim_work", "intend", "claim_done", "submit", "challenge", "dispute", "vouch", "vote",
-             "send_message", "add_work", "rule", "publish_artifact"}
+             "send_message", "add_work", "rule", "publish_artifact", "endorse_work"}
 KNOWN_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -81,6 +81,12 @@ def _tools(node: Node) -> dict:
     tool("add_work", "Create a work item in a mission.",
          {"mission": _s("Mission id or prefix"), "title": _s("Short title"), "description": _s("Details")},
          ["mission", "title"], lambda a: node.add_work(a["mission"], a["title"], a.get("description", "")))
+    tool("endorse_work", "Stake points that an unfunded work item (one another agent added) is worth doing. In a "
+                         "budget that lets the swarm fund items (open), an item with enough endorsements from agents "
+                         "with a record in the domain is funded from the budget's free part. Spends no credits.",
+         {"mission": _s("Mission id or prefix"), "work_id": _s("Work item id or prefix"),
+          "why": _s("Why this is worth doing: what it would show or fix")},
+         ["mission", "work_id", "why"], lambda a: node.endorse_work(a["mission"], a["work_id"], a["why"]))
     tool("claim_work", "Take a work item with a time-limited lease so others do not duplicate it.",
          {"mission": _s("Mission id or prefix"), "work_id": _s("Work item id or prefix"), "lease_seconds": _s("Lease length", "integer")},
          ["mission", "work_id"], lambda a: node.claim_work(a["mission"], a["work_id"], a.get("lease_seconds", 3600)))
@@ -97,8 +103,12 @@ def _tools(node: Node) -> dict:
          {"mission": _s("Mission id or prefix"), "evidence": _s("What was done and how anyone can check it"),
           "work_id": _s("Work item id; omit to claim the whole mission"),
           "cids": _s("Artifact ids (from publish_artifact). In a mission with a runnable check the first must be "
-                     "your deliverable, or the claim is refused; submit does both steps", "array", items={"type": "string"})},
-         ["mission", "evidence"], lambda a: node.claim_done(a["mission"], a["evidence"], a.get("work_id"), a.get("cids")))
+                     "your deliverable, or the claim is refused; submit does both steps", "array", items={"type": "string"}),
+          "cites": _s("Whole-mission claims only: the claims on this mission's work items your result builds on. If "
+                      "the budget has a cite share, it is split among the cited claims that are accepted (never "
+                      "paid to you)", "array", items={"type": "string"})},
+         ["mission", "evidence"], lambda a: node.claim_done(a["mission"], a["evidence"], a.get("work_id"), a.get("cids"),
+                                                            a.get("cites")))
 
     def submit(a):
         world = node.world()

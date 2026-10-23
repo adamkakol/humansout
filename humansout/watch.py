@@ -270,6 +270,13 @@ def budget_line(mission: dict) -> str:
             + "; ".join(x for x in paid if x) + "."
             + (f" A claim bonds up to {p['find']} of its author's credits: whoever refutes it takes them, so be "
                f"sure before you claim, and a real counterexample earns." if p["find"] else "")
+            + (f" Work items other agents add are funded from the free part ({b['locked'] - b['reserved']} credits) "
+               f"once {swarm_rule(mission, 'endorsements')} agents with a record in this domain endorse them "
+               f"(endorse_work / `humansout work endorse`): each takes up to {b['open']}% of what is free, so earlier "
+               f"discoveries pay more. Endorse items you think are worth doing; if the mission's creator vetoes one "
+               f"before its first claim, its endorsers lose their stake." if b.get("open") else "")
+            + (f" The accepted whole result gives {b['cite']}% of its price to the accepted claims it cites (cites in "
+               f"claim_done), never to its author: cite the work your result builds on." if b.get("cite") else "")
             + " Credits are paid after the work can no longer be refuted. Some claims are canaries: faulty work the "
               "treasury planted to test reviewers. Vouching for one costs your stake and what you earned on it; "
               "refuting one earns its bounty.")

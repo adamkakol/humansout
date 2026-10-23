@@ -211,6 +211,40 @@ class Node:
         work = self.world().missions[mid]["work"][wid]
         return {"mission_id": mid, "work_id": wid, "event": event["id"], "price": work["price"], "reserved": work["reserve"]}
 
+    def endorse_work(self, mission: str, work_id: str, why: str) -> dict:
+        """"This is worth doing": stake points on an unfunded item. In a budget that lets the swarm fund items
+        (open), an item with enough endorsements from agents with a record in the domain is funded from the free
+        part. Spends no credits."""
+        world = self.world()
+        mid = self._mid(world, mission)
+        if self.agent_id not in world.missions[mid]["participants"]:
+            self.join(mid)
+            world = self.world()
+        wid = self._wid(world, mid, work_id)
+        body = {"mission_id": mid, "work_id": wid, "evidence": {"text": why, "cids": []}}
+        work = world.missions[mid]["work"][wid]  # after the endorsements it joins: their owners are checked against it
+        event = self._emit("work.endorse", body, max([work["ts"]] + [x["ts"] for x in work["endorsements"]]))
+        work = self.world().missions[mid]["work"][wid]
+        return {"mission_id": mid, "work_id": wid, "event": event["id"], "endorsements": len(work["endorsements"]),
+                "funded": work["reserve"] > 0, "price": work["price"]}
+
+    def add_budget(self, mission: str, amount: int = 0, open_percent: int | None = None,
+                   extend_days: int | None = None) -> dict:
+        """As an owner (command line only): add credits to a mission's open budget. What it does not pay comes back
+        in proportion to what each funder put in. Its creator may also let the swarm fund new items from the free
+        part (open_percent) and extend the expiry."""
+        world = self.world()
+        mid = self._mid(world, mission)
+        body = {"mission_id": mid, "amount": int(amount)}
+        if open_percent is not None:
+            body["open"] = int(open_percent)
+        if extend_days:
+            body["extend"] = int(extend_days) * 86400
+        event = self._emit("budget.add", body, world.missions[mid]["ts"])
+        b = self.world().missions[mid]["bounty"]
+        return {"mission_id": mid, "event": event["id"], "budget": b["total"], "free": b["locked"] - b["reserved"],
+                "open": b.get("open", 0), "expires_ts": b["expires_ts"], "credits": self.world().credit_view(self.agent_id)}
+
     def treasury(self, issue: int | None = None, weekly_cap: int | None = None) -> dict:
         """As a trusted creator: `issue` creates credits in this node's balance (the network's genesis allocation,
         or a later public issue); `weekly_cap` limits what it may commit to budgets in any 7 days. Every issue is a
@@ -453,7 +487,8 @@ class Node:
         except UnicodeDecodeError:
             return {"cid": cid, "size": len(data), "binary": True}
 
-    def claim_done(self, mission: str, evidence: str, work_id: str | None = None, cids: list[str] | None = None) -> dict:
+    def claim_done(self, mission: str, evidence: str, work_id: str | None = None, cids: list[str] | None = None,
+                   cites: list[str] | None = None) -> dict:
         world = self.world()
         mid = self._mid(world, mission)
         target = self._wid(world, mid, work_id) if work_id else "mission"
@@ -464,6 +499,9 @@ class Node:
             if mine["author"] == self.agent_id and mine["target"] == target:
                 after = max([after] + [world.items[c]["ts"] for c in mine["challengers"]])
         body = {"mission_id": mid, "target": target, "evidence": {"text": evidence, "cids": list(cids or [])}}
+        if cites:  # the accepted work a whole-mission result builds on: it shares the cited part of the price
+            body["cites"] = [world.resolve(c, world.items) for c in cites]
+            after = max([after] + [world.items[c]["ts"] for c in body["cites"]])  # cited work exists before it
         event = self._check_ignored(self._emit("claim_done", body, after))
         item = self.world().items[event["id"]]
         return {"claim": event["id"], "target": target, "stake": item["stake"], "closes_at_ms": item["close_ts"]}

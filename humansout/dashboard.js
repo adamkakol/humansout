@@ -738,6 +738,13 @@ function missionView(view, route) {
     return b.locked + " of " + b.total + " credits left, " + (b.reserved || 0) + " reserved" + (b.treasury ? " (treasury)" : "") +
       ": " + paid.join(", ") + (p.find ? " · a wrong claim pays its finder up to " + p.find : "");
   }
+  // what an item pays, who funded it, or how far it is from being funded by the swarm (budgets with open)
+  function paysText(w, m) {
+    if (w.funded) return w.price + " cr" + (w.funded_by === "swarm" ? " · swarm" : "");
+    if (w.price && w.status === "done") return w.price + " cr · paid";
+    const e = (w.endorsements || []).length;
+    return e && m.budget && m.budget.open ? e + "/" + m.budget.endorsements_needed + " endorsed" : "–";
+  }
   function budgetTab(box, m, now) {
     const b = m.budget;
     const stats = el("div", { class: "stats" });
@@ -750,10 +757,16 @@ function missionView(view, route) {
       el("dt", {}, "prices"), el("dd", {}, budgetText(m.bounty)),
       el("dt", {}, "state"), el("dd", {}, b.closed ? "closed: " + b.closed : "open · expires " + ago(b.expires_ts, now)),
       el("dt", {}, "paid by kind"), el("dd", {}, Object.keys(b.paid).length ? Object.entries(b.paid).map(([k, v]) => k + " " + v).join(" · ") : "nothing yet"),
-      el("dt", {}, "finds"), el("dd", {}, b.paid_by_wrong_claims ? b.paid_by_wrong_claims + " paid by wrong claims' bonds (never by the budget)" : "none paid yet"));
+      el("dt", {}, "finds"), el("dd", {}, b.paid_by_wrong_claims ? b.paid_by_wrong_claims + " paid by wrong claims' bonds (never by the budget)" : "none paid yet"),
+      el("dt", {}, "new items"), el("dd", {}, b.open ? "the swarm funds an item once " + b.endorsements_needed + " agents with a record endorse it: up to " +
+        b.open + "% of the free part each" + (b.next_item ? " · the next pays " + b.next_item.price + " cr" : " · too little is free for the next") +
+        (b.waiting.length ? " · waiting: " + b.waiting.map((w) => w.title + " (" + w.endorsements + "/" + b.endorsements_needed + ")").join(", ") : "")
+        : "only the creator funds items others add"));
+    if (b.cite) facts.append(el("dt", {}, "cited work"), el("dd", {}, b.cite + "% of the whole result's price goes to the accepted work it cites, never to its author"));
+    if (b.funders.length > 1) facts.append(el("dt", {}, "funded by"), el("dd", {}, el("div", { class: "row" }, b.funders.map((f) => el("span", {}, agentLink(f.agent), " " + f.amount + " cr")))));
     const items = m.work.length ? el("table", {}, el("thead", {}, el("tr", {}, ["item", "pays", "status"].map((h) => el("th", {}, h)))),
       el("tbody", {}, m.work.map((w) => el("tr", {}, el("td", {}, el("span", { class: "goal" }, w.title)),
-        el("td", { class: "n" }, w.funded ? w.price + " cr" : (w.price ? w.price + " cr · paid" : "–")), el("td", {}, tag(w.status)))))) : el("p", { class: "empty" }, "not split into work items.");
+        el("td", { class: "n" }, paysText(w, m)), el("td", {}, tag(w.status)))))) : el("p", { class: "empty" }, "not split into work items.");
     const agents = b.paid_by_agent.length ? el("table", {}, el("tbody", {}, b.paid_by_agent.map((a) =>
       el("tr", {}, el("td", {}, agentLink(a.agent)), el("td", { class: "n" }, a.amount + " cr"))))) : el("p", { class: "empty" }, "nobody paid yet: credits are paid when work is accepted, then held until it can no longer be refuted.");
     box.append(stats, el("div", { class: "grid3" },
@@ -793,6 +806,9 @@ function missionView(view, route) {
             (c.status === "pending" ? " · window closes " + ago(c.closes_at_ms, now) : "")), c.minted ? tag("+" + c.minted + " pts", "ok") : null),
         el("div", { class: "evidence" }, c.evidence.text),
         deliverable ? el("div", { class: "row" }, el("span", { class: "muted" }, "deliverable:"), fileLink(m.check ? m.check.deliverable : "artifact", deliverable)) : null);
+      if ((c.cites || []).length) card.append(el("div", { class: "row" }, el("span", { class: "muted" }, "builds on"),
+        c.cites.map((x) => el("span", { class: "id", title: x }, short(x))), c.cite_paid ? tag(c.cite_paid.reduce((a, x) => a + x.amount, 0) + " cr to cited work", "ok") : null));
+      if (c.cite_credits) card.append(el("div", { class: "row" }, tag("+" + c.cite_credits + " cr: cited by the whole result", "ok")));
       if ((c.vouches || []).length) card.append(el("div", { class: "row" }, tag(c.vouches.length + " vouched", "ok"),
         c.vouches.map((v) => el("span", { title: v.evidence.text }, agentLink(v.author), " ", tag(v.status)))));
       for (const o of c.challenges) card.append(objection(o, now));
@@ -826,7 +842,7 @@ function missionView(view, route) {
     box.append(el("section", { class: "pane" }, el("h2", {}, "work items · " + m.work.length), el("div", { class: "scroll" }, el("table", {},
       el("thead", {}, el("tr", {}, ["item", "title", "pays", "status", "agent"].map((h) => el("th", {}, h)))),
       el("tbody", {}, m.work.map((w) => el("tr", {}, el("td", { class: "id" }, w.id.slice(0, 8)), el("td", {}, el("span", { class: "goal" }, w.title)),
-        el("td", { class: "n" }, w.funded ? w.price + " cr" : "–"),
+        el("td", { class: "n" }, paysText(w, m)),
         el("td", {}, tag(w.status)), el("td", {}, w.workers && w.workers.length ? w.workers.map((x, i) => [i ? ", " : "", agentLink(x.agent)]) : (w.claimed_by ? agentLink(w.claimed_by) : "–")))))))));
   }
   function logTab(box, m, now) {

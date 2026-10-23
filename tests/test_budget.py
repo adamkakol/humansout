@@ -29,6 +29,10 @@ def share(*nodes):
 
 @pytest.fixture
 def net(tmp_path):
+    return make_net(tmp_path)
+
+
+def make_net(tmp_path):
     clock = Clock()
     n = {name: Node(tmp_path / name, clock=clock) for name in ("treasury", "alice", "bob", "carol", "dave")}
     for node in n.values():  # every node runs the same policy: the treasury is the only trusted creator
@@ -67,13 +71,13 @@ def mission(node, test, budget=None, **rules):
                                bounty=budget, rules={"audit_window": 0, "vouch_slots": 1, **rules})["mission_id"]
 
 
-def build(n, who, mid, tmp_path, tag, work_id=None, verified=True):
+def build(n, who, mid, tmp_path, tag, work_id=None, verified=True, cites=None):
     if n[who].agent_id not in [p["agent"] for p in n[who].mission_state(mid)["participants"]]:
         n[who].join(mid)
     f = tmp_path / f"{who}-{tag}.py"
     f.write_text(f"# {tag}\n")
     cid = n[who].publish_artifact(mid, str(f), "slugify.py")["cid"]
-    claim = n[who].claim_done(mid, tag, work_id=work_id, cids=[cid])["claim"]
+    claim = n[who].claim_done(mid, tag, work_id=work_id, cids=[cid], cites=cites)["claim"]
     share(*n.values())
     for node in n.values() if verified else ():  # every node ran the mission's check on it: it passes
         node.store.save_verification(node.world().items[claim]["check_key"], {"result": "pass"})
