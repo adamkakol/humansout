@@ -17,10 +17,16 @@ def raw_request(url, data: bytes, timeout=5) -> bytes:
     host, port = url.removeprefix("http://").split(":")
     with socket.create_connection((host, int(port)), timeout=timeout) as s:
         s.sendall(data)
-        s.shutdown(socket.SHUT_WR)
+        try:
+            s.shutdown(socket.SHUT_WR)
+        except OSError:  # the server already answered and closed (a refused connection's 503): read what it sent
+            pass
         out = b""
-        while chunk := s.recv(65536):
-            out += chunk
+        try:
+            while chunk := s.recv(65536):
+                out += chunk
+        except ConnectionResetError:
+            pass
         return out
 
 
