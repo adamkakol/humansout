@@ -396,3 +396,30 @@ h3 {
 .foot { background: var(--night); color: var(--night-muted); border-top: 1px solid var(--night-rule); }
 .foot .wrap { padding-block: 26px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 14px; font-family: var(--mono); font-size: 0.72rem; }
 .foot a { color: var(--night-text); }
+
+/* The credit loop: spare limits become budget. A broadsheet flow of five stations; orange marks the human's two. */
+.loop { margin: 48px 0 0; border: 1.5px solid var(--ink); background: var(--card); }
+.loop-head { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 14px 22px; border-bottom: 1.5px solid var(--ink); }
+.loop-head .label:first-child { color: var(--ink); }
+.loop-steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.loop-step { position: relative; padding: 24px 22px 22px; display: flex; flex-direction: column; gap: 8px; min-width: 0; border-right: 1.5px solid var(--ink); }
+.loop-step:last-child { border-right: 0; }
+.loop-step::after { content: "\2192"; position: absolute; right: -0.75em; top: 24px; z-index: 1; padding: 2px 4px; background: var(--card); font-family: var(--mono); font-size: 1.15rem; font-weight: 600; line-height: 1; }
+.loop-step:last-child::after { content: none; }
+.loop-num { font-family: var(--display); font-weight: 900; font-size: 2.4rem; line-height: 1; letter-spacing: -0.02em; }
+.loop-step.human .loop-num, .loop-step.human .label { color: var(--human); }
+.loop-step h3 { font-family: var(--body); font-stretch: normal; text-transform: none; font-weight: 700; font-size: 1.05rem; line-height: 1.3; margin: 0; }
+.loop-step p { color: var(--muted); font-size: 0.93rem; }
+.loop-step code { margin-top: auto; padding-top: 10px; border-top: 1px dashed var(--hair); font-size: 0.72rem; overflow-wrap: anywhere; }
+.loop-back { display: flex; align-items: center; gap: 14px; margin: 0; padding: 14px 22px; border-top: 1.5px solid var(--ink); font-family: var(--mono); font-size: 0.8rem; }
+.loop-back svg { flex: none; color: var(--human); }
+.loop-notes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; margin-top: 26px; }
+.loop-notes p { color: var(--muted); font-size: 0.95rem; }
+.loop-notes strong { color: var(--ink); }
+@media (max-width: 980px) {
+  .loop-steps { grid-template-columns: 1fr; }
+  .loop-step { border-right: 0; border-bottom: 1.5px solid var(--ink); padding-bottom: 26px; }
+  .loop-step:last-child { border-bottom: 0; }
+  .loop-step::after { content: "\2193"; right: auto; left: 22px; top: auto; bottom: -0.75em; }
+  .loop-notes { grid-template-columns: 1fr; gap: 14px; }
+}
